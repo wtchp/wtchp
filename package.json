@@ -14,8 +14,9 @@
     "db:seed:remote": "wrangler d1 execute wtchp-db --file=./db/seed.sql --remote"
   },
   "dependencies": {
-    "hono": "^4.7.0",
+    "dashjs": "^5.1.1",
     "hls.js": "^1.6.0",
+    "hono": "^4.7.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.1.0"

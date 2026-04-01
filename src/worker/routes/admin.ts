@@ -87,7 +87,7 @@ adminRoutes.post("/videos", async (c) => {
         } else if (video_url.includes(".mpd")) {
           // DASH stream → convert to HLS
           const dashResult = await ingestDASH(c.env.STORAGE, video_url, slug);
-          finalVideoUrl = `/api/stream/${slug}/master.m3u8`;
+          finalVideoUrl = `/api/stream/${slug}/manifest.mpd`;
           ingestResults.video = {
             status: "ok", type: "dash→hls",
             segments: dashResult.segmentCount,

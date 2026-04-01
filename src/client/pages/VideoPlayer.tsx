@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import Hls from "hls.js";
+import * as dashjs from "dashjs";
 import { apiFetch } from "../hooks/useApi";
 import { useAuth } from "../hooks/useAuth";
 import { VideoCard } from "../components/VideoCard";
@@ -10,6 +11,7 @@ export function VideoPlayerPage() {
   const { user } = useAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const dashRef = useRef<dashjs.MediaPlayerClass | null>(null);
 
   const [video, setVideo] = useState<any>(null);
   const [related, setRelated] = useState<any[]>([]);
@@ -56,7 +58,7 @@ export function VideoPlayerPage() {
     return () => clearTimeout(viewTimer);
   }, [slug]);
 
-  // Init HLS player
+  // Init player (HLS / DASH / MP4)
   useEffect(() => {
     if (!video || !videoRef.current) return;
 
@@ -66,8 +68,24 @@ export function VideoPlayerPage() {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
+    if (dashRef.current) {
+      dashRef.current.destroy();
+      dashRef.current = null;
+    }
 
-    if (videoUrl.endsWith(".m3u8")) {
+    if (videoUrl.endsWith(".mpd")) {
+      // DASH player
+      const player = dashjs.MediaPlayer().create();
+      player.initialize(videoRef.current, videoUrl, false);
+      player.updateSettings({
+        streaming: {
+          buffer: {
+            fastSwitchEnabled: true,
+          },
+        },
+      });
+      dashRef.current = player;
+    } else if (videoUrl.endsWith(".m3u8")) {
       if (Hls.isSupported()) {
         const hls = new Hls({
           maxBufferLength: 30,
@@ -95,7 +113,6 @@ export function VideoPlayerPage() {
         });
         hlsRef.current = hls;
       } else if (videoRef.current.canPlayType("application/vnd.apple.mpegurl")) {
-        // Safari native HLS
         videoRef.current.src = videoUrl;
         videoRef.current.addEventListener("loadedmetadata", () => {
           videoRef.current?.play().catch(() => {});
@@ -111,6 +128,10 @@ export function VideoPlayerPage() {
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
+      }
+      if (dashRef.current) {
+        dashRef.current.destroy();
+        dashRef.current = null;
       }
     };
   }, [video]);

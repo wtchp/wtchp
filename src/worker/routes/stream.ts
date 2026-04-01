@@ -112,13 +112,14 @@ streamRoutes.get("/:slug/*", async (c) => {
     // Determine content type
     let contentType = "application/octet-stream";
     if (path.endsWith(".m3u8")) contentType = "application/vnd.apple.mpegurl";
+    else if (path.endsWith(".mpd")) contentType = "application/dash+xml";
     else if (path.endsWith(".ts")) contentType = "video/mp2t";
     else if (path.endsWith(".mp4")) contentType = "video/mp4";
     else if (path.endsWith(".webm")) contentType = "video/webm";
     else if (path.endsWith(".m4s")) contentType = "video/iso.segment";
 
     // Cache headers
-    const cacheControl = path.endsWith(".m3u8")
+    const cacheControl = (path.endsWith(".m3u8") || path.endsWith(".mpd"))
       ? "public, max-age=5"
       : "public, max-age=31536000, immutable";
 

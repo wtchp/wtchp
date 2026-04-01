@@ -3,14 +3,12 @@
  * Downloads remote videos and thumbnails to R2 storage
  */
 
-const VIDEO_CONTENT_TYPES = ["video/mp4", "video/webm", "video/mpeg", "application/octet-stream", "binary/octet-stream"];
 const IMAGE_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 const MIN_VIDEO_SIZE = 50_000; // 50KB minimum for a valid video
 const MIN_IMAGE_SIZE = 500;   // 500 bytes minimum for a valid image
 
 /**
  * Fetch with redirect following and User-Agent header
- * (some CDNs block requests without a proper UA)
  */
 async function safeFetch(url: string): Promise<Response> {
   const response = await fetch(url, {
@@ -27,7 +25,6 @@ async function safeFetch(url: string): Promise<Response> {
 
 /**
  * Download a thumbnail from external URL and store in R2
- * Returns the R2 path
  */
 export async function ingestThumbnail(
   storage: R2Bucket,
@@ -40,25 +37,20 @@ export async function ingestThumbnail(
   }
 
   const contentType = response.headers.get("content-type") || "";
-
-  // Validate it's actually an image
   if (contentType && !IMAGE_CONTENT_TYPES.some(t => contentType.includes(t)) && !contentType.includes("octet-stream")) {
     throw new Error(`Invalid thumbnail content-type: ${contentType}`);
   }
 
   const buffer = await response.arrayBuffer();
   if (buffer.byteLength < MIN_IMAGE_SIZE) {
-    throw new Error(`Thumbnail too small (${buffer.byteLength} bytes) - likely not a real image`);
+    throw new Error(`Thumbnail too small (${buffer.byteLength} bytes)`);
   }
 
   const ext = contentType.includes("png") ? "png" : contentType.includes("webp") ? "webp" : "jpg";
   const r2Path = `thumbnails/${slug}.${ext}`;
 
   await storage.put(r2Path, buffer, {
-    httpMetadata: {
-      contentType: contentType || "image/jpeg",
-      cacheControl: "public, max-age=31536000",
-    },
+    httpMetadata: { contentType: contentType || "image/jpeg", cacheControl: "public, max-age=31536000" },
   });
 
   return r2Path;
@@ -66,7 +58,6 @@ export async function ingestThumbnail(
 
 /**
  * Download a remote MP4 file and store in R2
- * Validates that the response is actually a video
  */
 export async function ingestMP4(
   storage: R2Bucket,
@@ -81,13 +72,11 @@ export async function ingestMP4(
   const contentType = response.headers.get("content-type") || "";
   const contentLength = parseInt(response.headers.get("content-length") || "0");
 
-  // Validate content-type — reject HTML / JSON / text responses
   if (contentType.includes("text/html") || contentType.includes("application/json") || contentType.includes("text/plain")) {
     const preview = await response.text();
     throw new Error(`Source returned ${contentType} instead of video. Preview: ${preview.substring(0, 200)}`);
   }
 
-  // Validate size if known
   if (contentLength > 0 && contentLength < MIN_VIDEO_SIZE) {
     const body = await response.text();
     throw new Error(`Response too small (${contentLength} bytes). Content: ${body.substring(0, 200)}`);
@@ -98,16 +87,12 @@ export async function ingestMP4(
   if (!body) throw new Error("Empty response body");
 
   if (contentLength > 100 * 1024 * 1024) {
-    // >100MB: use multipart upload
     const upload = await storage.createMultipartUpload(r2Path, {
-      httpMetadata: {
-        contentType: "video/mp4",
-        cacheControl: "public, max-age=31536000",
-      },
+      httpMetadata: { contentType: "video/mp4", cacheControl: "public, max-age=31536000" },
     });
 
     const reader = body.getReader();
-    const chunkSize = 10 * 1024 * 1024; // 10MB parts
+    const chunkSize = 10 * 1024 * 1024;
     let partNumber = 1;
     const parts: R2UploadedPart[] = [];
     let buffer = new Uint8Array(0);
@@ -115,7 +100,6 @@ export async function ingestMP4(
 
     while (true) {
       const { done, value } = await reader.read();
-
       if (value) {
         const newBuffer = new Uint8Array(buffer.length + value.length);
         newBuffer.set(buffer);
@@ -123,16 +107,13 @@ export async function ingestMP4(
         buffer = newBuffer;
         totalSize += value.length;
       }
-
       if (buffer.length >= chunkSize || (done && buffer.length > 0)) {
         const chunk = buffer.slice(0, chunkSize);
         buffer = buffer.slice(chunkSize);
-
         const part = await upload.uploadPart(partNumber, chunk);
         parts.push(part);
         partNumber++;
       }
-
       if (done) {
         if (buffer.length > 0) {
           const part = await upload.uploadPart(partNumber, buffer);
@@ -142,28 +123,20 @@ export async function ingestMP4(
       }
     }
 
-    // Validate size after download
     if (totalSize < MIN_VIDEO_SIZE) {
       await upload.abort();
-      throw new Error(`Downloaded video too small (${totalSize} bytes) - likely not a valid video`);
+      throw new Error(`Downloaded video too small (${totalSize} bytes)`);
     }
 
     await upload.complete(parts);
     return { path: r2Path, size: totalSize };
   } else {
-    // Small file: direct put
     const arrayBuffer = await response.arrayBuffer();
-
-    // Validate size
     if (arrayBuffer.byteLength < MIN_VIDEO_SIZE) {
-      throw new Error(`Downloaded video too small (${arrayBuffer.byteLength} bytes). This is likely not a valid video file.`);
+      throw new Error(`Downloaded video too small (${arrayBuffer.byteLength} bytes)`);
     }
-
     await storage.put(r2Path, arrayBuffer, {
-      httpMetadata: {
-        contentType: "video/mp4",
-        cacheControl: "public, max-age=31536000",
-      },
+      httpMetadata: { contentType: "video/mp4", cacheControl: "public, max-age=31536000" },
     });
     return { path: r2Path, size: arrayBuffer.byteLength };
   }
@@ -171,7 +144,6 @@ export async function ingestMP4(
 
 /**
  * Download a remote HLS stream (m3u8 + segments) and store in R2
- * Rewrites the manifest to point to local R2 paths
  */
 export async function ingestHLS(
   storage: R2Bucket,
@@ -182,199 +154,121 @@ export async function ingestHLS(
   let segmentCount = 0;
   const baseUrl = manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
 
-  // Fetch master manifest
   const masterRes = await safeFetch(manifestUrl);
-  if (!masterRes.ok) {
-    throw new Error(`Failed to fetch manifest: ${masterRes.status}`);
-  }
+  if (!masterRes.ok) throw new Error(`Failed to fetch manifest: ${masterRes.status}`);
   let masterContent = await masterRes.text();
 
-  // Validate it looks like an m3u8
   if (!masterContent.includes("#EXTM3U")) {
-    throw new Error(`Invalid manifest — does not contain #EXTM3U. Got: ${masterContent.substring(0, 200)}`);
+    throw new Error(`Invalid manifest. Got: ${masterContent.substring(0, 200)}`);
   }
 
-  // Check if it's a master playlist (contains variant streams) or a media playlist
   const isMaster = masterContent.includes("#EXT-X-STREAM-INF");
 
   if (isMaster) {
-    // Parse variant playlists
     const lines = masterContent.split("\n");
     const variantUrls: string[] = [];
-
     for (const line of lines) {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith("#")) {
-        const fullUrl = trimmed.startsWith("http") ? trimmed : `${baseUrl}${trimmed}`;
-        variantUrls.push(fullUrl);
+        variantUrls.push(trimmed.startsWith("http") ? trimmed : `${baseUrl}${trimmed}`);
       }
     }
 
-    // Download each variant playlist and its segments
     for (let i = 0; i < variantUrls.length; i++) {
       const variantUrl = variantUrls[i];
       const variantBase = variantUrl.substring(0, variantUrl.lastIndexOf("/") + 1);
       const variantDir = `variant_${i}`;
-
       try {
         const varRes = await safeFetch(variantUrl);
-        if (!varRes.ok) {
-          errors.push(`Failed to fetch variant ${i}: ${varRes.status}`);
-          continue;
-        }
+        if (!varRes.ok) { errors.push(`Variant ${i}: ${varRes.status}`); continue; }
         const varContent = await varRes.text();
+        if (!varContent.includes("#EXTM3U")) { errors.push(`Variant ${i}: not m3u8`); continue; }
 
-        // Validate variant playlist
-        if (!varContent.includes("#EXTM3U")) {
-          errors.push(`Variant ${i} is not a valid m3u8`);
-          continue;
-        }
-
-        // Download segments
         const varLines = varContent.split("\n");
         const newVarLines: string[] = [];
-
         for (const vLine of varLines) {
           const vTrimmed = vLine.trim();
           if (vTrimmed && !vTrimmed.startsWith("#") && isSegmentLine(vTrimmed)) {
             const segUrl = vTrimmed.startsWith("http") ? vTrimmed : `${variantBase}${vTrimmed}`;
             const segFilename = `seg_${segmentCount}.ts`;
-
             try {
               const segRes = await safeFetch(segUrl);
               if (segRes.ok) {
                 const segData = await segRes.arrayBuffer();
-                if (segData.byteLength > 100) { // at least 100 bytes for a valid segment
+                if (segData.byteLength > 100) {
                   await storage.put(`videos/${slug}/${variantDir}/${segFilename}`, segData, {
-                    httpMetadata: {
-                      contentType: "video/mp2t",
-                      cacheControl: "public, max-age=31536000",
-                    },
+                    httpMetadata: { contentType: "video/mp2t", cacheControl: "public, max-age=31536000" },
                   });
                   newVarLines.push(segFilename);
                   segmentCount++;
-                } else {
-                  errors.push(`Segment too small: ${segUrl} (${segData.byteLength}b)`);
-                  newVarLines.push(vTrimmed);
-                }
-              } else {
-                errors.push(`Segment ${segUrl}: ${segRes.status}`);
-                newVarLines.push(vTrimmed);
-              }
-            } catch (e: any) {
-              errors.push(`Segment error: ${e.message}`);
-              newVarLines.push(vTrimmed);
-            }
-          } else {
-            newVarLines.push(vTrimmed);
-          }
+                } else { newVarLines.push(vTrimmed); }
+              } else { newVarLines.push(vTrimmed); }
+            } catch { newVarLines.push(vTrimmed); }
+          } else { newVarLines.push(vTrimmed); }
         }
-
-        // Save rewritten variant playlist
-        const newVarContent = newVarLines.join("\n");
-        await storage.put(`videos/${slug}/${variantDir}/playlist.m3u8`, newVarContent, {
-          httpMetadata: {
-            contentType: "application/vnd.apple.mpegurl",
-            cacheControl: "public, max-age=3600",
-          },
+        await storage.put(`videos/${slug}/${variantDir}/playlist.m3u8`, newVarLines.join("\n"), {
+          httpMetadata: { contentType: "application/vnd.apple.mpegurl" },
         });
-      } catch (e: any) {
-        errors.push(`Variant ${i} error: ${e.message}`);
-      }
+      } catch (e: any) { errors.push(`Variant ${i}: ${e.message}`); }
     }
 
-    // Rewrite master playlist
+    // Rewrite master
     const masterLines = masterContent.split("\n");
     const newMasterLines: string[] = [];
-    let variantIndex = 0;
-
+    let vi = 0;
     for (const mLine of masterLines) {
-      const mTrimmed = mLine.trim();
-      if (mTrimmed && !mTrimmed.startsWith("#")) {
-        newMasterLines.push(`variant_${variantIndex}/playlist.m3u8`);
-        variantIndex++;
-      } else {
-        newMasterLines.push(mTrimmed);
-      }
+      const mt = mLine.trim();
+      if (mt && !mt.startsWith("#")) { newMasterLines.push(`variant_${vi}/playlist.m3u8`); vi++; }
+      else { newMasterLines.push(mt); }
     }
-
     masterContent = newMasterLines.join("\n");
   } else {
     // Single media playlist
     const lines = masterContent.split("\n");
     const newLines: string[] = [];
-
     for (const line of lines) {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith("#") && isSegmentLine(trimmed)) {
         const segUrl = trimmed.startsWith("http") ? trimmed : `${baseUrl}${trimmed}`;
         const segFilename = `seg_${segmentCount}.ts`;
-
         try {
           const segRes = await safeFetch(segUrl);
           if (segRes.ok) {
             const segData = await segRes.arrayBuffer();
             if (segData.byteLength > 100) {
               await storage.put(`videos/${slug}/segments/${segFilename}`, segData, {
-                httpMetadata: {
-                  contentType: "video/mp2t",
-                  cacheControl: "public, max-age=31536000",
-                },
+                httpMetadata: { contentType: "video/mp2t", cacheControl: "public, max-age=31536000" },
               });
               newLines.push(`segments/${segFilename}`);
               segmentCount++;
-            } else {
-              errors.push(`Segment too small: ${segUrl}`);
-              newLines.push(trimmed);
-            }
-          } else {
-            errors.push(`Segment failed: ${segUrl}`);
-            newLines.push(trimmed);
-          }
-        } catch (e: any) {
-          errors.push(`Segment error: ${e.message}`);
-          newLines.push(trimmed);
-        }
-      } else {
-        newLines.push(trimmed);
-      }
+            } else { newLines.push(trimmed); }
+          } else { newLines.push(trimmed); }
+        } catch { newLines.push(trimmed); }
+      } else { newLines.push(trimmed); }
     }
     masterContent = newLines.join("\n");
   }
 
-  // Validate we actually downloaded something
   if (segmentCount === 0) {
-    throw new Error(`No segments were downloaded. ${errors.length} errors occurred: ${errors.slice(0, 3).join("; ")}`);
+    throw new Error(`No segments downloaded. ${errors.slice(0, 3).join("; ")}`);
   }
 
-  // Save master manifest
   const masterPath = `videos/${slug}/master.m3u8`;
   await storage.put(masterPath, masterContent, {
-    httpMetadata: {
-      contentType: "application/vnd.apple.mpegurl",
-      cacheControl: "public, max-age=3600",
-    },
+    httpMetadata: { contentType: "application/vnd.apple.mpegurl", cacheControl: "public, max-age=3600" },
   });
 
   return { path: masterPath, segmentCount, errors };
 }
 
 function isSegmentLine(line: string): boolean {
-  return (
-    line.endsWith(".ts") ||
-    line.endsWith(".m4s") ||
-    line.endsWith(".aac") ||
-    line.endsWith(".mp4") ||
-    line.includes(".ts?") ||
-    line.includes(".m4s?")
-  );
+  return line.endsWith(".ts") || line.endsWith(".m4s") || line.endsWith(".aac") ||
+         line.endsWith(".mp4") || line.includes(".ts?") || line.includes(".m4s?");
 }
 
 /**
- * Download a DASH stream (.mpd) and convert to HLS
- * - Parses MPD XML to find segment URLs
- * - Downloads init + media segments
- * - Creates HLS m3u8 manifests pointing to downloaded segments
+ * Download a DASH stream (.mpd) — keep as MPD format
+ * Downloads all segments, rewrites MPD to use local relative paths
  */
 export async function ingestDASH(
   storage: R2Bucket,
@@ -385,127 +279,97 @@ export async function ingestDASH(
   let segmentCount = 0;
   const baseUrl = mpdUrl.substring(0, mpdUrl.lastIndexOf("/") + 1);
 
-  // Fetch MPD manifest
+  // Fetch MPD
   const mpdRes = await safeFetch(mpdUrl);
-  if (!mpdRes.ok) {
-    throw new Error(`Failed to fetch MPD: ${mpdRes.status}`);
-  }
+  if (!mpdRes.ok) throw new Error(`Failed to fetch MPD: ${mpdRes.status}`);
   const mpdContent = await mpdRes.text();
 
   if (!mpdContent.includes("<MPD") && !mpdContent.includes("<mpd")) {
-    throw new Error(`Invalid MPD manifest. Content: ${mpdContent.substring(0, 200)}`);
+    throw new Error(`Invalid MPD. Content: ${mpdContent.substring(0, 200)}`);
   }
 
-  // Store original MPD for reference
-  await storage.put(`videos/${slug}/original.mpd`, mpdContent, {
-    httpMetadata: { contentType: "application/dash+xml" },
-  });
+  // Find all referenced files from SegmentTemplate patterns
+  const filesToDownload = new Set<string>();
 
-  // Parse MPD to find representations
-  const representations = parseMPD(mpdContent, baseUrl);
+  // Extract all RepresentationIDs from the MPD
+  const repIdMatches = [...mpdContent.matchAll(/<Representation[^>]+id="([^"]+)"/gi)];
+  const repIds = repIdMatches.map(m => m[1]);
 
-  if (representations.length === 0) {
-    throw new Error("No representations found in MPD manifest");
+  // Extract SegmentTemplate initialization and media patterns
+  const initPatterns = [...mpdContent.matchAll(/initialization="([^"]+)"/gi)].map(m => m[1]);
+  const mediaPatterns = [...mpdContent.matchAll(/\bmedia="([^"]+)"/gi)].map(m => m[1]);
+
+  // Parse SegmentTimeline to count segments
+  const timelineEntries: { duration: number; repeat: number }[] = [];
+  for (const sMatch of mpdContent.matchAll(/<S\s+([^/>]+)\/?\s*>/gi)) {
+    const attrs = sMatch[1];
+    const d = parseInt(attrs.match(/d="(\d+)"/)?.[1] || "0");
+    const r = parseInt(attrs.match(/r="(\d+)"/)?.[1] || "0");
+    timelineEntries.push({ duration: d, repeat: r });
   }
 
-  // Pick the best video representation (highest bandwidth) and one audio
-  const videoReps = representations.filter(r => r.mimeType.startsWith("video"));
-  const audioReps = representations.filter(r => r.mimeType.startsWith("audio"));
+  // Total segments per representation from timeline
+  const timelineCount = (mpdContent.match(/<SegmentTimeline>/gi) || []).length || 1;
+  let totalTimelineSegments = 0;
+  for (const e of timelineEntries) totalTimelineSegments += 1 + e.repeat;
+  const segmentsPerRep = Math.ceil(totalTimelineSegments / timelineCount);
 
-  // Take up to 3 video qualities
-  const selectedVideo = videoReps
-    .sort((a, b) => b.bandwidth - a.bandwidth)
-    .slice(0, 3);
-  const selectedAudio = audioReps.slice(0, 1);
-
-  const allSelected = [...selectedVideo, ...selectedAudio];
-
-  if (allSelected.length === 0) {
-    // Fallback: try to download all representations
-    allSelected.push(...representations.slice(0, 3));
+  // If no timeline, estimate from duration
+  let estimatedSegments = segmentsPerRep;
+  if (estimatedSegments === 0) {
+    const durMatch = mpdContent.match(/mediaPresentationDuration="([^"]+)"/);
+    const totalDur = durMatch ? parseDuration(durMatch[1]) : 0;
+    const tsMatch = mpdContent.match(/timescale="(\d+)"/);
+    const durAttrMatch = mpdContent.match(/<SegmentTemplate[^>]+duration="(\d+)"/);
+    const timescale = parseInt(tsMatch?.[1] || "1000");
+    const segDur = parseInt(durAttrMatch?.[1] || "6000");
+    estimatedSegments = totalDur > 0 ? Math.ceil(totalDur / (segDur / timescale)) : 200;
   }
 
-  // Download segments for each representation and create variant playlists
-  const variants: { dir: string; bandwidth: number; width: number; height: number; isAudio: boolean }[] = [];
+  const startNumMatch = mpdContent.match(/startNumber="(\d+)"/);
+  const startNum = parseInt(startNumMatch?.[1] || "1");
 
-  for (let i = 0; i < allSelected.length; i++) {
-    const rep = allSelected[i];
-    const variantDir = `variant_${i}`;
-    const isAudio = rep.mimeType.startsWith("audio");
+  // Build file list: init segments
+  for (const initTpl of initPatterns) {
+    for (const repId of repIds) {
+      const filename = resolveTemplate(initTpl, repId, 0);
+      filesToDownload.add(filename);
+    }
+  }
 
+  // Build file list: media segments
+  for (const mediaTpl of mediaPatterns) {
+    for (const repId of repIds) {
+      for (let n = startNum; n < startNum + estimatedSegments; n++) {
+        const filename = resolveTemplate(mediaTpl, repId, n);
+        filesToDownload.add(filename);
+      }
+    }
+  }
+
+  // Download all files
+  for (const filename of filesToDownload) {
+    const remoteUrl = filename.startsWith("http") ? filename : baseUrl + filename;
     try {
-      // Download init segment if exists
-      if (rep.initUrl) {
-        const initRes = await safeFetch(rep.initUrl);
-        if (initRes.ok) {
-          const initData = await initRes.arrayBuffer();
-          await storage.put(`videos/${slug}/${variantDir}/init.mp4`, initData, {
-            httpMetadata: { contentType: rep.mimeType, cacheControl: "public, max-age=31536000" },
+      const res = await safeFetch(remoteUrl);
+      if (res.ok) {
+        const data = await res.arrayBuffer();
+        if (data.byteLength > 10) {
+          const ct = filename.endsWith(".m4s") ? "video/iso.segment" :
+                     filename.endsWith(".webm") ? "video/webm" :
+                     filename.endsWith(".mp4") ? "video/mp4" : "application/octet-stream";
+          await storage.put(`videos/${slug}/${filename}`, data, {
+            httpMetadata: { contentType: ct, cacheControl: "public, max-age=31536000" },
           });
-        } else {
-          errors.push(`Init segment failed: ${initRes.status}`);
+          segmentCount++;
         }
+      } else if (res.status === 404) {
+        // Past last segment, that's OK
+      } else {
+        errors.push(`${filename}: HTTP ${res.status}`);
       }
-
-      // Download media segments
-      const playlistLines: string[] = [];
-      playlistLines.push("#EXTM3U");
-      playlistLines.push("#EXT-X-VERSION:7"); // v7 supports fMP4
-      playlistLines.push(`#EXT-X-TARGETDURATION:${Math.ceil(rep.segmentDuration || 6)}`);
-      playlistLines.push("#EXT-X-MEDIA-SEQUENCE:0");
-
-      // fMP4 init segment reference
-      if (rep.initUrl) {
-        playlistLines.push(`#EXT-X-MAP:URI="init.mp4"`);
-      }
-
-      for (let s = 0; s < rep.segmentUrls.length; s++) {
-        const segUrl = rep.segmentUrls[s];
-        const segExt = segUrl.includes(".m4s") ? "m4s" : segUrl.includes(".mp4") ? "mp4" : "m4s";
-        const segFilename = `seg_${s}.${segExt}`;
-
-        try {
-          const segRes = await safeFetch(segUrl);
-          if (segRes.ok) {
-            const segData = await segRes.arrayBuffer();
-            if (segData.byteLength > 50) {
-              await storage.put(`videos/${slug}/${variantDir}/${segFilename}`, segData, {
-                httpMetadata: {
-                  contentType: isAudio ? "audio/mp4" : "video/mp4",
-                  cacheControl: "public, max-age=31536000",
-                },
-              });
-              const duration = rep.segmentDurations?.[s] || rep.segmentDuration || 6;
-              playlistLines.push(`#EXTINF:${duration.toFixed(3)},`);
-              playlistLines.push(segFilename);
-              segmentCount++;
-            } else {
-              errors.push(`Segment too small: seg_${s} (${segData.byteLength}b)`);
-            }
-          } else {
-            errors.push(`Segment ${s}: HTTP ${segRes.status}`);
-          }
-        } catch (e: any) {
-          errors.push(`Segment ${s}: ${e.message}`);
-        }
-      }
-
-      playlistLines.push("#EXT-X-ENDLIST");
-
-      // Save variant playlist as HLS
-      await storage.put(`videos/${slug}/${variantDir}/playlist.m3u8`, playlistLines.join("\n"), {
-        httpMetadata: { contentType: "application/vnd.apple.mpegurl" },
-      });
-
-      variants.push({
-        dir: variantDir,
-        bandwidth: rep.bandwidth,
-        width: rep.width || 0,
-        height: rep.height || 0,
-        isAudio,
-      });
     } catch (e: any) {
-      errors.push(`Variant ${i}: ${e.message}`);
+      errors.push(`${filename}: ${e.message}`);
     }
   }
 
@@ -513,248 +377,25 @@ export async function ingestDASH(
     throw new Error(`No segments downloaded. Errors: ${errors.slice(0, 5).join("; ")}`);
   }
 
-  // Create master HLS playlist
-  const hasAudio = variants.some(v => v.isAudio);
-  const masterLines: string[] = ["#EXTM3U"];
+  // Store MPD as-is (segment filenames in templates are relative, so they work)
+  // Just remove any external BaseURL elements
+  let rewrittenMPD = mpdContent.replace(/<BaseURL>[^<]*<\/BaseURL>/gi, "");
 
-  // Define audio track first
-  for (const v of variants) {
-    if (v.isAudio) {
-      masterLines.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",DEFAULT=YES,AUTOSELECT=YES,URI="${v.dir}/playlist.m3u8"`);
-    }
-  }
-
-  // Define video streams with audio reference
-  for (const v of variants) {
-    if (!v.isAudio) {
-      const resolution = v.width && v.height ? `,RESOLUTION=${v.width}x${v.height}` : "";
-      const audioRef = hasAudio ? `,AUDIO="audio"` : "";
-      masterLines.push(`#EXT-X-STREAM-INF:BANDWIDTH=${v.bandwidth}${resolution}${audioRef}`);
-      masterLines.push(`${v.dir}/playlist.m3u8`);
-    }
-  }
-
-  const masterPath = `videos/${slug}/master.m3u8`;
-  await storage.put(masterPath, masterLines.join("\n"), {
-    httpMetadata: { contentType: "application/vnd.apple.mpegurl" },
+  const mpdPath = `videos/${slug}/manifest.mpd`;
+  await storage.put(mpdPath, rewrittenMPD, {
+    httpMetadata: { contentType: "application/dash+xml", cacheControl: "public, max-age=3600" },
   });
 
-  return { path: masterPath, segmentCount, errors };
+  return { path: mpdPath, segmentCount, errors };
 }
 
-/**
- * Parse an MPD manifest (XML) to extract segment URLs
- * Handles: SegmentTemplate with $Number$, SegmentList, and direct BaseURL
- */
-function parseMPD(mpd: string, baseUrl: string): DASHRepresentation[] {
-  const reps: DASHRepresentation[] = [];
-
-  // Extract all AdaptationSet blocks
-  const adaptationSets = extractBlocks(mpd, "AdaptationSet");
-
-  for (const adaptSet of adaptationSets) {
-    const asMimeType = extractAttr(adaptSet, "mimeType") || "";
-    const asContentType = extractAttr(adaptSet, "contentType") || "";
-    const asCodecs = extractAttr(adaptSet, "codecs") || "";
-
-    // Determine if this is audio or video
-    // Check: mimeType, contentType attribute, codecs (mp4a/aac = audio), or Representation mimeType
-    const isAudioAdaptSet =
-      asMimeType.startsWith("audio") ||
-      asContentType === "audio" ||
-      asCodecs.startsWith("mp4a") ||
-      asCodecs.startsWith("aac") ||
-      (adaptSet.includes('mimeType="audio') && !adaptSet.includes('mimeType="video'));
-
-    const mimeType = asMimeType ||
-      (isAudioAdaptSet ? "audio/mp4" :
-       asContentType.includes("video") ? "video/mp4" :
-       asContentType.includes("audio") ? "audio/mp4" :
-       "video/mp4");
-
-    // Get SegmentTemplate at AdaptationSet level
-    const asTemplate = extractBlock(adaptSet, "SegmentTemplate");
-    const asTimescale = parseInt(extractAttr(asTemplate || "", "timescale") || "1");
-    const asInitTemplate = extractAttr(asTemplate || "", "initialization") || "";
-    const asMediaTemplate = extractAttr(asTemplate || "", "media") || "";
-    const asStartNumber = parseInt(extractAttr(asTemplate || "", "startNumber") || "1");
-
-    // Parse SegmentTimeline at AdaptationSet level
-    const asTimeline = parseSegmentTimeline(asTemplate || "", asTimescale);
-
-    // Extract Representation blocks
-    const repBlocks = extractBlocks(adaptSet, "Representation");
-
-    for (const repBlock of repBlocks) {
-      const repId = extractAttr(repBlock, "id") || "1";
-      const bandwidth = parseInt(extractAttr(repBlock, "bandwidth") || "0");
-      const width = parseInt(extractAttr(repBlock, "width") || "0");
-      const height = parseInt(extractAttr(repBlock, "height") || "0");
-      const repMimeType = extractAttr(repBlock, "mimeType") || mimeType;
-
-      // Check for Representation-level SegmentTemplate
-      const repTemplate = extractBlock(repBlock, "SegmentTemplate");
-      const template = repTemplate || asTemplate || "";
-
-      const timescale = parseInt(extractAttr(template, "timescale") || String(asTimescale));
-      const initTemplate = extractAttr(template, "initialization") || asInitTemplate;
-      const mediaTemplate = extractAttr(template, "media") || asMediaTemplate;
-      const startNumber = parseInt(extractAttr(template, "startNumber") || String(asStartNumber));
-
-      // Parse timeline (Rep-level takes precedence)
-      const timeline = repTemplate ? parseSegmentTimeline(repTemplate, timescale) : asTimeline;
-
-      // Resolve BaseURL
-      const repBaseUrl = extractInnerText(repBlock, "BaseURL");
-      const adaptBaseUrl = extractInnerText(adaptSet, "BaseURL");
-      const effectiveBase = repBaseUrl
-        ? (repBaseUrl.startsWith("http") ? repBaseUrl : baseUrl + repBaseUrl)
-        : adaptBaseUrl
-          ? (adaptBaseUrl.startsWith("http") ? adaptBaseUrl : baseUrl + adaptBaseUrl)
-          : baseUrl;
-
-      const rep: DASHRepresentation = {
-        id: repId,
-        bandwidth,
-        width,
-        height,
-        mimeType: repMimeType,
-        initUrl: "",
-        segmentUrls: [],
-        segmentDuration: 0,
-        segmentDurations: [],
-      };
-
-      if (mediaTemplate && timeline.length > 0) {
-        // SegmentTemplate + SegmentTimeline
-        if (initTemplate) {
-          rep.initUrl = resolveTemplate(initTemplate, repId, 0, 0, effectiveBase);
-        }
-
-        let segNum = startNumber;
-        for (const seg of timeline) {
-          const url = resolveTemplate(mediaTemplate, repId, segNum, seg.time, effectiveBase);
-          rep.segmentUrls.push(url);
-          rep.segmentDurations!.push(seg.duration / timescale);
-          segNum++;
-        }
-        rep.segmentDuration = timeline.length > 0 ? timeline[0].duration / timescale : 6;
-      } else if (mediaTemplate) {
-        // SegmentTemplate with duration (no timeline)
-        const segDuration = parseInt(extractAttr(template, "duration") || "0");
-        const totalDuration = parseDuration(extractAttr(mpd, "mediaPresentationDuration") || "");
-
-        if (initTemplate) {
-          rep.initUrl = resolveTemplate(initTemplate, repId, 0, 0, effectiveBase);
-        }
-
-        if (segDuration > 0 && totalDuration > 0) {
-          const numSegments = Math.ceil(totalDuration / (segDuration / timescale));
-          rep.segmentDuration = segDuration / timescale;
-          for (let n = startNumber; n < startNumber + numSegments; n++) {
-            rep.segmentUrls.push(resolveTemplate(mediaTemplate, repId, n, (n - startNumber) * segDuration, effectiveBase));
-            rep.segmentDurations!.push(segDuration / timescale);
-          }
-        }
-      } else {
-        // SegmentList or direct BaseURL
-        const segListBlock = extractBlock(repBlock, "SegmentList") || extractBlock(adaptSet, "SegmentList") || "";
-        if (segListBlock) {
-          const initSrc = extractAttr(extractBlock(segListBlock, "Initialization") || "", "sourceURL");
-          if (initSrc) {
-            rep.initUrl = initSrc.startsWith("http") ? initSrc : effectiveBase + initSrc;
-          }
-          const segUrls = [...segListBlock.matchAll(/sourceURL="([^"]+)"/g)];
-          // Skip the first if it was the init
-          for (const m of segUrls) {
-            if (m[1] === initSrc) continue;
-            const url = m[1].startsWith("http") ? m[1] : effectiveBase + m[1];
-            rep.segmentUrls.push(url);
-          }
-          rep.segmentDuration = parseInt(extractAttr(segListBlock, "duration") || "0") / timescale || 6;
-        }
-      }
-
-      if (rep.segmentUrls.length > 0) {
-        reps.push(rep);
-      }
-    }
-  }
-
-  return reps;
-}
-
-interface DASHRepresentation {
-  id: string;
-  bandwidth: number;
-  width: number;
-  height: number;
-  mimeType: string;
-  initUrl: string;
-  segmentUrls: string[];
-  segmentDuration: number;
-  segmentDurations?: number[];
-}
-
-function extractBlocks(xml: string, tag: string): string[] {
-  const blocks: string[] = [];
-  const regex = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>|<${tag}[^>]*\\/>`, "gi");
-  let match;
-  while ((match = regex.exec(xml)) !== null) {
-    blocks.push(match[0]);
-  }
-  return blocks;
-}
-
-function extractBlock(xml: string, tag: string): string | null {
-  const blocks = extractBlocks(xml, tag);
-  return blocks.length > 0 ? blocks[0] : null;
-}
-
-function extractAttr(xml: string, attr: string): string | null {
-  const regex = new RegExp(`${attr}="([^"]*)"`, "i");
-  const match = xml.match(regex);
-  return match ? match[1] : null;
-}
-
-function extractInnerText(xml: string, tag: string): string {
-  const regex = new RegExp(`<${tag}[^>]*>([^<]+)<\\/${tag}>`, "i");
-  const match = xml.match(regex);
-  return match ? match[1].trim() : "";
-}
-
-function resolveTemplate(template: string, repId: string, number: number, time: number, baseUrl: string): string {
-  let url = template
+function resolveTemplate(template: string, repId: string, number: number): string {
+  return template
     .replace(/\$RepresentationID\$/g, repId)
     .replace(/\$Number\$/g, String(number))
     .replace(/\$Number%(\d+)d\$/g, (_, pad) => String(number).padStart(parseInt(pad), "0"))
-    .replace(/\$Time\$/g, String(time))
-    .replace(/\$Bandwidth\$/g, "0");
-  if (!url.startsWith("http")) {
-    url = baseUrl + url;
-  }
-  return url;
-}
-
-function parseSegmentTimeline(templateBlock: string, timescale: number): { time: number; duration: number }[] {
-  const segments: { time: number; duration: number }[] = [];
-  const sMatches = [...templateBlock.matchAll(/<S\s+([^/>]+)\/?\s*>/gi)];
-  let currentTime = 0;
-
-  for (const m of sMatches) {
-    const attrs = m[1];
-    const t = parseInt(attrs.match(/t="(\d+)"/)?.[1] || String(currentTime));
-    const d = parseInt(attrs.match(/d="(\d+)"/)?.[1] || "0");
-    const r = parseInt(attrs.match(/r="(\d+)"/)?.[1] || "0");
-
-    currentTime = t;
-    for (let i = 0; i <= r; i++) {
-      segments.push({ time: currentTime, duration: d });
-      currentTime += d;
-    }
-  }
-
-  return segments;
+    .replace(/\$Bandwidth\$/g, "0")
+    .replace(/\$Time\$/g, "0");
 }
 
 function parseDuration(iso: string): number {
@@ -765,4 +406,3 @@ function parseDuration(iso: string): number {
          (parseInt(match[2] || "0") * 60) +
          (parseFloat(match[3] || "0"));
 }
-
