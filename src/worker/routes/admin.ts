@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireAdmin } from "../middleware/auth";
+import { ingestThumbnail, ingestMP4, ingestHLS } from "../services/ingest";
 
 type HonoEnv = { Bindings: Env; Variables: { userId?: number; userRole?: string } };
 
@@ -50,13 +51,25 @@ adminRoutes.post("/videos", async (c) => {
 
     const slug = generateSlug(title);
 
+    // Auto-download thumbnail to R2 if external URL provided
+    let finalThumbnail = thumbnail_url || null;
+    if (thumbnail_url && (thumbnail_url.startsWith("http://") || thumbnail_url.startsWith("https://"))) {
+      try {
+        const thumbPath = await ingestThumbnail(c.env.STORAGE, thumbnail_url, slug);
+        finalThumbnail = `/api/stream/thumb/${thumbPath}`;
+      } catch (e: any) {
+        // Keep original URL if download fails
+        console.error("Thumbnail ingest failed:", e.message);
+      }
+    }
+
     const result = await c.env.DB.prepare(
       `INSERT INTO videos (title, slug, description, duration, thumbnail_url, video_url, preview_url,
        resolution, file_size, source, source_url, tags, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       title, slug, description || null, duration || 0,
-      thumbnail_url || null, video_url, preview_url || null,
+      finalThumbnail, video_url, preview_url || null,
       resolution || "720p", file_size || 0,
       source || null, source_url || null,
       JSON.stringify(tags || []), status || "active"
@@ -399,6 +412,113 @@ adminRoutes.delete("/models/:id", async (c) => {
     await c.env.DB.prepare("DELETE FROM video_models WHERE model_id = ?").bind(id).run();
     await c.env.DB.prepare("DELETE FROM models WHERE id = ?").bind(id).run();
     return c.json({ success: true });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message }, 500);
+  }
+});
+// ============================================
+// CONTENT INGEST
+// ============================================
+
+// POST /api/admin/ingest/:id — download remote video content to R2
+adminRoutes.post("/ingest/:id", async (c) => {
+  try {
+    const id = parseInt(c.req.param("id"));
+    const video = await c.env.DB.prepare(
+      "SELECT * FROM videos WHERE id = ?"
+    ).bind(id).first<any>();
+
+    if (!video) {
+      return c.json({ success: false, error: "Video not found" }, 404);
+    }
+
+    const videoUrl = video.video_url;
+    const slug = video.slug;
+    const results: any = { thumbnail: null, video: null };
+
+    // Ingest thumbnail if external
+    if (video.thumbnail_url && (video.thumbnail_url.startsWith("http://") || video.thumbnail_url.startsWith("https://"))) {
+      try {
+        const thumbPath = await ingestThumbnail(c.env.STORAGE, video.thumbnail_url, slug);
+        const localThumbUrl = `/api/stream/thumb/${thumbPath}`;
+        await c.env.DB.prepare(
+          "UPDATE videos SET thumbnail_url = ? WHERE id = ?"
+        ).bind(localThumbUrl, id).run();
+        results.thumbnail = { status: "ok", path: thumbPath };
+      } catch (e: any) {
+        results.thumbnail = { status: "error", error: e.message };
+      }
+    } else {
+      results.thumbnail = { status: "skipped", reason: "already local or empty" };
+    }
+
+    // Ingest video
+    if (videoUrl.startsWith("http://") || videoUrl.startsWith("https://")) {
+      try {
+        if (videoUrl.includes(".m3u8")) {
+          // HLS stream
+          const hlsResult = await ingestHLS(c.env.STORAGE, videoUrl, slug);
+          const localVideoUrl = `/api/stream/${slug}/master.m3u8`;
+          await c.env.DB.prepare(
+            "UPDATE videos SET video_url = ?, source_url = ? WHERE id = ?"
+          ).bind(localVideoUrl, videoUrl, id).run();
+          results.video = {
+            status: "ok",
+            type: "hls",
+            path: hlsResult.path,
+            segments: hlsResult.segmentCount,
+            errors: hlsResult.errors,
+          };
+        } else {
+          // MP4
+          const mp4Result = await ingestMP4(c.env.STORAGE, videoUrl, slug);
+          const localVideoUrl = `/api/stream/${slug}/video.mp4`;
+          await c.env.DB.prepare(
+            "UPDATE videos SET video_url = ?, source_url = ?, file_size = ? WHERE id = ?"
+          ).bind(localVideoUrl, videoUrl, mp4Result.size, id).run();
+          results.video = {
+            status: "ok",
+            type: "mp4",
+            path: mp4Result.path,
+            size: mp4Result.size,
+          };
+        }
+      } catch (e: any) {
+        results.video = { status: "error", error: e.message };
+      }
+    } else {
+      results.video = { status: "skipped", reason: "already local" };
+    }
+
+    return c.json({ success: true, data: results });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message }, 500);
+  }
+});
+
+// POST /api/admin/ingest-thumbnail/:id — re-download just the thumbnail
+adminRoutes.post("/ingest-thumbnail/:id", async (c) => {
+  try {
+    const id = parseInt(c.req.param("id"));
+    const { url } = await c.req.json<{ url: string }>();
+
+    const video = await c.env.DB.prepare(
+      "SELECT slug FROM videos WHERE id = ?"
+    ).bind(id).first<any>();
+    if (!video) return c.json({ success: false, error: "Video not found" }, 404);
+
+    const thumbUrl = url || "";
+    if (!thumbUrl.startsWith("http")) {
+      return c.json({ success: false, error: "Valid URL required" }, 400);
+    }
+
+    const thumbPath = await ingestThumbnail(c.env.STORAGE, thumbUrl, video.slug);
+    const localThumbUrl = `/api/stream/thumb/${thumbPath}`;
+    await c.env.DB.prepare(
+      "UPDATE videos SET thumbnail_url = ? WHERE id = ?"
+    ).bind(localThumbUrl, id).run();
+
+    return c.json({ success: true, data: { path: thumbPath, url: localThumbUrl } });
   } catch (err: any) {
     return c.json({ success: false, error: err.message }, 500);
   }

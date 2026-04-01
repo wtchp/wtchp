@@ -112,6 +112,30 @@ export function AdminPage() {
     loadData();
   };
 
+  const [ingesting, setIngesting] = useState<Record<number, string>>({});
+
+  const handleIngest = async (id: number) => {
+    setIngesting((prev) => ({ ...prev, [id]: "Downloading..." }));
+    try {
+      const res = await apiFetch(`/admin/ingest/${id}`, { method: "POST" });
+      if (res.success) {
+        const d = res.data;
+        let msg = "";
+        if (d.thumbnail?.status === "ok") msg += "✅ Thumbnail saved. ";
+        if (d.video?.status === "ok") msg += `✅ Video saved (${d.video.type}${d.video.segments ? `, ${d.video.segments} segments` : ""}). `;
+        if (d.video?.errors?.length) msg += `⚠ ${d.video.errors.length} segment errors. `;
+        if (d.thumbnail?.status === "error") msg += `❌ Thumb: ${d.thumbnail.error}. `;
+        if (d.video?.status === "error") msg += `❌ Video: ${d.video.error}. `;
+        setIngesting((prev) => ({ ...prev, [id]: msg || "Done" }));
+        loadData();
+      } else {
+        setIngesting((prev) => ({ ...prev, [id]: `Error: ${res.error}` }));
+      }
+    } catch (err: any) {
+      setIngesting((prev) => ({ ...prev, [id]: `Error: ${err.message}` }));
+    }
+  };
+
   if (user?.role !== "admin") {
     return (
       <div className="page-container">
@@ -190,6 +214,7 @@ export function AdminPage() {
                   <tr>
                     <th>ID</th>
                     <th>Title</th>
+                    <th>Storage</th>
                     <th>Status</th>
                     <th>Views</th>
                     <th>Created</th>
@@ -197,11 +222,36 @@ export function AdminPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {videos.map((v) => (
+                  {videos.map((v) => {
+                    const isLocal = v.video_url?.startsWith("/api/stream");
+                    const thumbLocal = v.thumbnail_url?.startsWith("/api/stream");
+                    return (
                     <tr key={v.id}>
                       <td>{v.id}</td>
-                      <td style={{ maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <td style={{ maxWidth: 250, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {v.title}
+                      </td>
+                      <td>
+                        <div style={{ display: "flex", gap: 4, flexDirection: "column" }}>
+                          <span style={{
+                            fontSize: "10px",
+                            padding: "1px 6px",
+                            borderRadius: "var(--radius-full)",
+                            background: isLocal ? "rgba(46,213,115,0.15)" : "rgba(255,165,2,0.15)",
+                            color: isLocal ? "var(--success)" : "var(--warning)",
+                          }}>
+                            {isLocal ? "📦 R2" : "🔗 Remote"}
+                          </span>
+                          <span style={{
+                            fontSize: "10px",
+                            padding: "1px 6px",
+                            borderRadius: "var(--radius-full)",
+                            background: thumbLocal ? "rgba(46,213,115,0.15)" : v.thumbnail_url ? "rgba(255,165,2,0.15)" : "rgba(100,100,100,0.15)",
+                            color: thumbLocal ? "var(--success)" : v.thumbnail_url ? "var(--warning)" : "var(--text-tertiary)",
+                          }}>
+                            {thumbLocal ? "🖼 R2" : v.thumbnail_url ? "🖼 Remote" : "🖼 None"}
+                          </span>
+                        </div>
                       </td>
                       <td>
                         <span style={{
@@ -217,16 +267,34 @@ export function AdminPage() {
                       <td>{(v.view_count || 0).toLocaleString()}</td>
                       <td>{new Date(v.created_at).toLocaleDateString()}</td>
                       <td>
-                        <button
-                          className="btn btn-ghost"
-                          style={{ color: "var(--error)", fontSize: "var(--font-size-xs)" }}
-                          onClick={() => handleDeleteVideo(v.id)}
-                        >
-                          Delete
-                        </button>
+                        <div style={{ display: "flex", gap: 4, flexDirection: "column" }}>
+                          {!isLocal && (
+                            <button
+                              className="btn btn-secondary"
+                              style={{ fontSize: "10px", padding: "2px 8px" }}
+                              onClick={() => handleIngest(v.id)}
+                              disabled={ingesting[v.id] === "Downloading..."}
+                            >
+                              {ingesting[v.id] === "Downloading..." ? "⏳" : "💾"} Ingest
+                            </button>
+                          )}
+                          <button
+                            className="btn btn-ghost"
+                            style={{ color: "var(--error)", fontSize: "10px" }}
+                            onClick={() => handleDeleteVideo(v.id)}
+                          >
+                            🗑 Delete
+                          </button>
+                        </div>
+                        {ingesting[v.id] && ingesting[v.id] !== "Downloading..." && (
+                          <div style={{ fontSize: "10px", marginTop: 4, maxWidth: 200, wordBreak: "break-word", color: "var(--text-secondary)" }}>
+                            {ingesting[v.id]}
+                          </div>
+                        )}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
               {videos.length === 0 && !loading && (

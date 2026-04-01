@@ -10,6 +10,7 @@ import { adminRoutes } from "./routes/admin";
 import { searchRoutes } from "./routes/search";
 import { streamRoutes } from "./routes/stream";
 import { modelRoutes } from "./routes/models";
+import { setupRoutes } from "./routes/setup";
 export { ViewCounter } from "./durable/viewCounter";
 
 type HonoEnv = { Bindings: Env; Variables: { userId?: number; userRole?: string } };
@@ -41,6 +42,7 @@ app.get("/api/health", (c) => {
 });
 
 // Mount routes
+app.route("/api/setup", setupRoutes);
 app.route("/api/auth", authRoutes);
 app.route("/api/videos", videoRoutes);
 app.route("/api/categories", categoryRoutes);

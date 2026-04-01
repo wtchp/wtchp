@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Routes, Route } from "react-router-dom";
 import { AuthProvider } from "./hooks/useAuth";
 import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
 import { AgeGate } from "./pages/AgeGate";
+import { SetupWizard } from "./pages/SetupWizard";
 import { HomePage } from "./pages/Home";
 import { VideoPlayerPage } from "./pages/VideoPlayer";
 import { SearchPage } from "./pages/Search";
@@ -13,11 +14,43 @@ import { LoginPage, RegisterPage } from "./pages/Auth";
 import { FavoritesPage, HistoryPage } from "./pages/UserPages";
 import { AdminPage } from "./pages/Admin";
 import { ModelPage } from "./pages/ModelPage";
+import { apiFetch } from "./hooks/useApi";
 
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
 
   const toggleSidebar = () => setSidebarOpen((prev) => !prev);
+
+  // Check if setup is needed on first load
+  useEffect(() => {
+    apiFetch("/setup/status")
+      .then((res) => {
+        if (res.success) {
+          setNeedsSetup(res.data.needs_setup);
+        } else {
+          setNeedsSetup(false);
+        }
+      })
+      .catch(() => setNeedsSetup(false));
+  }, []);
+
+  // Show nothing while checking
+  if (needsSetup === null) {
+    return (
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        minHeight: "100vh", background: "var(--bg-primary)",
+      }}>
+        <div className="spinner" />
+      </div>
+    );
+  }
+
+  // Show setup wizard if needed
+  if (needsSetup) {
+    return <SetupWizard onComplete={() => setNeedsSetup(false)} />;
+  }
 
   return (
     <AuthProvider>

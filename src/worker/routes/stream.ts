@@ -41,8 +41,8 @@ streamRoutes.get("/:slug/*", async (c) => {
       "Access-Control-Allow-Methods": "GET, OPTIONS",
     });
 
-    if (object.httpMetadata?.contentLength) {
-      headers.set("Content-Length", object.httpMetadata.contentLength.toString());
+    if (object.size) {
+      headers.set("Content-Length", object.size.toString());
     }
 
     return new Response(object.body, { headers });
@@ -51,23 +51,24 @@ streamRoutes.get("/:slug/*", async (c) => {
   }
 });
 
-// Serve thumbnails
-streamRoutes.get("/thumb/:slug/:file", async (c) => {
+// Serve thumbnails from R2 — matches /api/stream/thumb/thumbnails/{slug}.{ext}
+streamRoutes.get("/thumb/*", async (c) => {
   try {
-    const slug = c.req.param("slug");
-    const file = c.req.param("file");
-    const r2Key = `thumbnails/${slug}/${file}`;
-    const object = await c.env.STORAGE.get(r2Key);
+    const r2Key = c.req.path.replace("/api/stream/thumb/", "");
 
+    if (!r2Key) {
+      return c.json({ success: false, error: "Path required" }, 400);
+    }
+
+    const object = await c.env.STORAGE.get(r2Key);
     if (!object) {
       return c.json({ success: false, error: "Not found" }, 404);
     }
 
     let contentType = "image/jpeg";
-    if (file.endsWith(".png")) contentType = "image/png";
-    if (file.endsWith(".webp")) contentType = "image/webp";
-    if (file.endsWith(".webm")) contentType = "video/webm";
-    if (file.endsWith(".gif")) contentType = "image/gif";
+    if (r2Key.endsWith(".png")) contentType = "image/png";
+    if (r2Key.endsWith(".webp")) contentType = "image/webp";
+    if (r2Key.endsWith(".gif")) contentType = "image/gif";
 
     return new Response(object.body, {
       headers: {
