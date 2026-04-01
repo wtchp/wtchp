@@ -276,7 +276,44 @@ adminRoutes.put("/videos/:id", async (c) => {
 adminRoutes.delete("/videos/:id", async (c) => {
   try {
     const id = parseInt(c.req.param("id"));
-    await c.env.DB.prepare("UPDATE videos SET status = 'deleted' WHERE id = ?").bind(id).run();
+
+    // Get video info for R2 cleanup
+    const video = await c.env.DB.prepare(
+      "SELECT slug, thumbnail_url FROM videos WHERE id = ?"
+    ).bind(id).first<any>();
+
+    if (video) {
+      // Delete all R2 files under videos/{slug}/
+      try {
+        const videoPrefix = `videos/${video.slug}/`;
+        let cursor: string | undefined;
+        do {
+          const listed = await c.env.STORAGE.list({ prefix: videoPrefix, cursor });
+          if (listed.objects.length > 0) {
+            await Promise.all(
+              listed.objects.map(obj => c.env.STORAGE.delete(obj.key))
+            );
+          }
+          cursor = listed.truncated ? listed.cursor : undefined;
+        } while (cursor);
+      } catch (e: any) {
+        console.error("R2 video cleanup error:", e.message);
+      }
+
+      // Delete thumbnail from R2
+      if (video.thumbnail_url?.includes("/api/stream/thumb/")) {
+        try {
+          const thumbKey = video.thumbnail_url.replace("/api/stream/thumb/", "");
+          await c.env.STORAGE.delete(thumbKey);
+        } catch (e: any) {
+          console.error("R2 thumbnail cleanup error:", e.message);
+        }
+      }
+    }
+
+    // Delete from DB (hard delete, not soft)
+    await c.env.DB.prepare("DELETE FROM videos WHERE id = ?").bind(id).run();
+
     return c.json({ success: true });
   } catch (err: any) {
     return c.json({ success: false, error: err.message }, 500);

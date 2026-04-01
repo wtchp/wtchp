@@ -514,13 +514,22 @@ export async function ingestDASH(
   }
 
   // Create master HLS playlist
+  const hasAudio = variants.some(v => v.isAudio);
   const masterLines: string[] = ["#EXTM3U"];
+
+  // Define audio track first
   for (const v of variants) {
     if (v.isAudio) {
-      masterLines.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",DEFAULT=YES,URI="${v.dir}/playlist.m3u8"`);
-    } else {
+      masterLines.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",DEFAULT=YES,AUTOSELECT=YES,URI="${v.dir}/playlist.m3u8"`);
+    }
+  }
+
+  // Define video streams with audio reference
+  for (const v of variants) {
+    if (!v.isAudio) {
       const resolution = v.width && v.height ? `,RESOLUTION=${v.width}x${v.height}` : "";
-      masterLines.push(`#EXT-X-STREAM-INF:BANDWIDTH=${v.bandwidth}${resolution}`);
+      const audioRef = hasAudio ? `,AUDIO="audio"` : "";
+      masterLines.push(`#EXT-X-STREAM-INF:BANDWIDTH=${v.bandwidth}${resolution}${audioRef}`);
       masterLines.push(`${v.dir}/playlist.m3u8`);
     }
   }
@@ -546,7 +555,22 @@ function parseMPD(mpd: string, baseUrl: string): DASHRepresentation[] {
   for (const adaptSet of adaptationSets) {
     const asMimeType = extractAttr(adaptSet, "mimeType") || "";
     const asContentType = extractAttr(adaptSet, "contentType") || "";
-    const mimeType = asMimeType || (asContentType.includes("video") ? "video/mp4" : asContentType.includes("audio") ? "audio/mp4" : "video/mp4");
+    const asCodecs = extractAttr(adaptSet, "codecs") || "";
+
+    // Determine if this is audio or video
+    // Check: mimeType, contentType attribute, codecs (mp4a/aac = audio), or Representation mimeType
+    const isAudioAdaptSet =
+      asMimeType.startsWith("audio") ||
+      asContentType === "audio" ||
+      asCodecs.startsWith("mp4a") ||
+      asCodecs.startsWith("aac") ||
+      (adaptSet.includes('mimeType="audio') && !adaptSet.includes('mimeType="video'));
+
+    const mimeType = asMimeType ||
+      (isAudioAdaptSet ? "audio/mp4" :
+       asContentType.includes("video") ? "video/mp4" :
+       asContentType.includes("audio") ? "audio/mp4" :
+       "video/mp4");
 
     // Get SegmentTemplate at AdaptationSet level
     const asTemplate = extractBlock(adaptSet, "SegmentTemplate");
