@@ -3,6 +3,28 @@
  * Downloads remote videos and thumbnails to R2 storage
  */
 
+const VIDEO_CONTENT_TYPES = ["video/mp4", "video/webm", "video/mpeg", "application/octet-stream", "binary/octet-stream"];
+const IMAGE_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+const MIN_VIDEO_SIZE = 50_000; // 50KB minimum for a valid video
+const MIN_IMAGE_SIZE = 500;   // 500 bytes minimum for a valid image
+
+/**
+ * Fetch with redirect following and User-Agent header
+ * (some CDNs block requests without a proper UA)
+ */
+async function safeFetch(url: string): Promise<Response> {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Referer": new URL(url).origin + "/",
+    },
+    redirect: "follow",
+  });
+  return response;
+}
+
 /**
  * Download a thumbnail from external URL and store in R2
  * Returns the R2 path
@@ -12,19 +34,29 @@ export async function ingestThumbnail(
   externalUrl: string,
   slug: string
 ): Promise<string> {
-  const response = await fetch(externalUrl);
+  const response = await safeFetch(externalUrl);
   if (!response.ok) {
-    throw new Error(`Failed to fetch thumbnail: ${response.status}`);
+    throw new Error(`Failed to fetch thumbnail: ${response.status} ${response.statusText}`);
   }
 
-  const contentType = response.headers.get("content-type") || "image/jpeg";
+  const contentType = response.headers.get("content-type") || "";
+
+  // Validate it's actually an image
+  if (contentType && !IMAGE_CONTENT_TYPES.some(t => contentType.includes(t)) && !contentType.includes("octet-stream")) {
+    throw new Error(`Invalid thumbnail content-type: ${contentType}`);
+  }
+
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength < MIN_IMAGE_SIZE) {
+    throw new Error(`Thumbnail too small (${buffer.byteLength} bytes) - likely not a real image`);
+  }
+
   const ext = contentType.includes("png") ? "png" : contentType.includes("webp") ? "webp" : "jpg";
   const r2Path = `thumbnails/${slug}.${ext}`;
 
-  const buffer = await response.arrayBuffer();
   await storage.put(r2Path, buffer, {
     httpMetadata: {
-      contentType,
+      contentType: contentType || "image/jpeg",
       cacheControl: "public, max-age=31536000",
     },
   });
@@ -34,24 +66,36 @@ export async function ingestThumbnail(
 
 /**
  * Download a remote MP4 file and store in R2
- * Returns the R2 path
+ * Validates that the response is actually a video
  */
 export async function ingestMP4(
   storage: R2Bucket,
   externalUrl: string,
   slug: string
 ): Promise<{ path: string; size: number }> {
-  const response = await fetch(externalUrl);
+  const response = await safeFetch(externalUrl);
   if (!response.ok) {
-    throw new Error(`Failed to fetch video: ${response.status}`);
+    throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  const contentLength = parseInt(response.headers.get("content-length") || "0");
+
+  // Validate content-type — reject HTML / JSON / text responses
+  if (contentType.includes("text/html") || contentType.includes("application/json") || contentType.includes("text/plain")) {
+    const preview = await response.text();
+    throw new Error(`Source returned ${contentType} instead of video. Preview: ${preview.substring(0, 200)}`);
+  }
+
+  // Validate size if known
+  if (contentLength > 0 && contentLength < MIN_VIDEO_SIZE) {
+    const body = await response.text();
+    throw new Error(`Response too small (${contentLength} bytes). Content: ${body.substring(0, 200)}`);
   }
 
   const r2Path = `videos/${slug}/video.mp4`;
   const body = response.body;
   if (!body) throw new Error("Empty response body");
-
-  // Stream directly to R2 using multipart upload for large files
-  const contentLength = parseInt(response.headers.get("content-length") || "0");
 
   if (contentLength > 100 * 1024 * 1024) {
     // >100MB: use multipart upload
@@ -98,18 +142,30 @@ export async function ingestMP4(
       }
     }
 
+    // Validate size after download
+    if (totalSize < MIN_VIDEO_SIZE) {
+      await upload.abort();
+      throw new Error(`Downloaded video too small (${totalSize} bytes) - likely not a valid video`);
+    }
+
     await upload.complete(parts);
     return { path: r2Path, size: totalSize };
   } else {
     // Small file: direct put
-    const buffer = await response.arrayBuffer();
-    await storage.put(r2Path, buffer, {
+    const arrayBuffer = await response.arrayBuffer();
+
+    // Validate size
+    if (arrayBuffer.byteLength < MIN_VIDEO_SIZE) {
+      throw new Error(`Downloaded video too small (${arrayBuffer.byteLength} bytes). This is likely not a valid video file.`);
+    }
+
+    await storage.put(r2Path, arrayBuffer, {
       httpMetadata: {
         contentType: "video/mp4",
         cacheControl: "public, max-age=31536000",
       },
     });
-    return { path: r2Path, size: buffer.byteLength };
+    return { path: r2Path, size: arrayBuffer.byteLength };
   }
 }
 
@@ -127,11 +183,16 @@ export async function ingestHLS(
   const baseUrl = manifestUrl.substring(0, manifestUrl.lastIndexOf("/") + 1);
 
   // Fetch master manifest
-  const masterRes = await fetch(manifestUrl);
+  const masterRes = await safeFetch(manifestUrl);
   if (!masterRes.ok) {
     throw new Error(`Failed to fetch manifest: ${masterRes.status}`);
   }
   let masterContent = await masterRes.text();
+
+  // Validate it looks like an m3u8
+  if (!masterContent.includes("#EXTM3U")) {
+    throw new Error(`Invalid manifest — does not contain #EXTM3U. Got: ${masterContent.substring(0, 200)}`);
+  }
 
   // Check if it's a master playlist (contains variant streams) or a media playlist
   const isMaster = masterContent.includes("#EXT-X-STREAM-INF");
@@ -144,7 +205,6 @@ export async function ingestHLS(
     for (const line of lines) {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith("#")) {
-        // This is a variant playlist URI
         const fullUrl = trimmed.startsWith("http") ? trimmed : `${baseUrl}${trimmed}`;
         variantUrls.push(fullUrl);
       }
@@ -154,43 +214,52 @@ export async function ingestHLS(
     for (let i = 0; i < variantUrls.length; i++) {
       const variantUrl = variantUrls[i];
       const variantBase = variantUrl.substring(0, variantUrl.lastIndexOf("/") + 1);
-      const variantFilename = variantUrl.substring(variantUrl.lastIndexOf("/") + 1);
       const variantDir = `variant_${i}`;
 
       try {
-        const varRes = await fetch(variantUrl);
+        const varRes = await safeFetch(variantUrl);
         if (!varRes.ok) {
           errors.push(`Failed to fetch variant ${i}: ${varRes.status}`);
           continue;
         }
-        let varContent = await varRes.text();
+        const varContent = await varRes.text();
 
-        // Download segments referenced in this variant
+        // Validate variant playlist
+        if (!varContent.includes("#EXTM3U")) {
+          errors.push(`Variant ${i} is not a valid m3u8`);
+          continue;
+        }
+
+        // Download segments
         const varLines = varContent.split("\n");
         const newVarLines: string[] = [];
 
         for (const vLine of varLines) {
           const vTrimmed = vLine.trim();
-          if (vTrimmed && !vTrimmed.startsWith("#") && (vTrimmed.endsWith(".ts") || vTrimmed.endsWith(".m4s") || vTrimmed.endsWith(".aac") || vTrimmed.includes(".ts?"))) {
-            // This is a segment
+          if (vTrimmed && !vTrimmed.startsWith("#") && isSegmentLine(vTrimmed)) {
             const segUrl = vTrimmed.startsWith("http") ? vTrimmed : `${variantBase}${vTrimmed}`;
             const segFilename = `seg_${segmentCount}.ts`;
 
             try {
-              const segRes = await fetch(segUrl);
+              const segRes = await safeFetch(segUrl);
               if (segRes.ok) {
                 const segData = await segRes.arrayBuffer();
-                await storage.put(`videos/${slug}/${variantDir}/${segFilename}`, segData, {
-                  httpMetadata: {
-                    contentType: "video/mp2t",
-                    cacheControl: "public, max-age=31536000",
-                  },
-                });
-                newVarLines.push(segFilename);
-                segmentCount++;
+                if (segData.byteLength > 100) { // at least 100 bytes for a valid segment
+                  await storage.put(`videos/${slug}/${variantDir}/${segFilename}`, segData, {
+                    httpMetadata: {
+                      contentType: "video/mp2t",
+                      cacheControl: "public, max-age=31536000",
+                    },
+                  });
+                  newVarLines.push(segFilename);
+                  segmentCount++;
+                } else {
+                  errors.push(`Segment too small: ${segUrl} (${segData.byteLength}b)`);
+                  newVarLines.push(vTrimmed);
+                }
               } else {
-                errors.push(`Segment fetch failed: ${segUrl} (${segRes.status})`);
-                newVarLines.push(vTrimmed); // keep original
+                errors.push(`Segment ${segUrl}: ${segRes.status}`);
+                newVarLines.push(vTrimmed);
               }
             } catch (e: any) {
               errors.push(`Segment error: ${e.message}`);
@@ -214,7 +283,7 @@ export async function ingestHLS(
       }
     }
 
-    // Rewrite master playlist to point to local variant paths
+    // Rewrite master playlist
     const masterLines = masterContent.split("\n");
     const newMasterLines: string[] = [];
     let variantIndex = 0;
@@ -231,28 +300,33 @@ export async function ingestHLS(
 
     masterContent = newMasterLines.join("\n");
   } else {
-    // Single media playlist — download segments directly
+    // Single media playlist
     const lines = masterContent.split("\n");
     const newLines: string[] = [];
 
     for (const line of lines) {
       const trimmed = line.trim();
-      if (trimmed && !trimmed.startsWith("#") && (trimmed.endsWith(".ts") || trimmed.endsWith(".m4s") || trimmed.includes(".ts?"))) {
+      if (trimmed && !trimmed.startsWith("#") && isSegmentLine(trimmed)) {
         const segUrl = trimmed.startsWith("http") ? trimmed : `${baseUrl}${trimmed}`;
         const segFilename = `seg_${segmentCount}.ts`;
 
         try {
-          const segRes = await fetch(segUrl);
+          const segRes = await safeFetch(segUrl);
           if (segRes.ok) {
             const segData = await segRes.arrayBuffer();
-            await storage.put(`videos/${slug}/segments/${segFilename}`, segData, {
-              httpMetadata: {
-                contentType: "video/mp2t",
-                cacheControl: "public, max-age=31536000",
-              },
-            });
-            newLines.push(`segments/${segFilename}`);
-            segmentCount++;
+            if (segData.byteLength > 100) {
+              await storage.put(`videos/${slug}/segments/${segFilename}`, segData, {
+                httpMetadata: {
+                  contentType: "video/mp2t",
+                  cacheControl: "public, max-age=31536000",
+                },
+              });
+              newLines.push(`segments/${segFilename}`);
+              segmentCount++;
+            } else {
+              errors.push(`Segment too small: ${segUrl}`);
+              newLines.push(trimmed);
+            }
           } else {
             errors.push(`Segment failed: ${segUrl}`);
             newLines.push(trimmed);
@@ -268,6 +342,11 @@ export async function ingestHLS(
     masterContent = newLines.join("\n");
   }
 
+  // Validate we actually downloaded something
+  if (segmentCount === 0) {
+    throw new Error(`No segments were downloaded. ${errors.length} errors occurred: ${errors.slice(0, 3).join("; ")}`);
+  }
+
   // Save master manifest
   const masterPath = `videos/${slug}/master.m3u8`;
   await storage.put(masterPath, masterContent, {
@@ -278,4 +357,15 @@ export async function ingestHLS(
   });
 
   return { path: masterPath, segmentCount, errors };
+}
+
+function isSegmentLine(line: string): boolean {
+  return (
+    line.endsWith(".ts") ||
+    line.endsWith(".m4s") ||
+    line.endsWith(".aac") ||
+    line.endsWith(".mp4") ||
+    line.includes(".ts?") ||
+    line.includes(".m4s?")
+  );
 }
