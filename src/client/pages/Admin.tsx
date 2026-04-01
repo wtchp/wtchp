@@ -24,6 +24,13 @@ export function AdminPage() {
   // Add model form
   const [modelForm, setModelForm] = useState({ name: "", bio: "", avatar_url: "" });
 
+  // File upload state
+  const [uploadMode, setUploadMode] = useState(true);
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [thumbFile, setThumbFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
   useEffect(() => {
     loadData();
   }, []);
@@ -70,6 +77,58 @@ export function AdminPage() {
     } catch (err: any) {
       setFormMsg(`Error: ${err.message}`);
     }
+  };
+
+  const handleUploadVideo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!videoFile) {
+      setFormMsg("Error: Please select a video file");
+      return;
+    }
+    setFormMsg("");
+    setUploading(true);
+    setUploadProgress(10);
+
+    try {
+      const formData = new FormData();
+      formData.append("video", videoFile);
+      if (thumbFile) formData.append("thumbnail", thumbFile);
+      formData.append("title", videoForm.title);
+      formData.append("description", videoForm.description);
+      formData.append("duration", String(videoForm.duration));
+      formData.append("resolution", videoForm.resolution);
+      formData.append("tags", JSON.stringify(videoForm.tags.split(",").map(t => t.trim()).filter(Boolean)));
+
+      setUploadProgress(30);
+
+      const token = localStorage.getItem("token");
+      const response = await fetch("/api/admin/upload/create", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+
+      setUploadProgress(90);
+      const res: any = await response.json();
+
+      if (res.success) {
+        setFormMsg(`✅ Video uploaded: ${res.data.slug} (${(videoFile.size / 1024 / 1024).toFixed(1)} MB)`);
+        setVideoForm({
+          title: "", description: "", video_url: "", thumbnail_url: "",
+          duration: 0, resolution: "720p", tags: "", categories: [], models: [],
+        });
+        setVideoFile(null);
+        setThumbFile(null);
+        setUploadProgress(100);
+        loadData();
+      } else {
+        setFormMsg(`Error: ${res.error}`);
+      }
+    } catch (err: any) {
+      setFormMsg(`Error: ${err.message}`);
+    }
+    setUploading(false);
+    setTimeout(() => setUploadProgress(0), 2000);
   };
 
   const handleAddCategory = async (e: React.FormEvent) => {
@@ -307,7 +366,28 @@ export function AdminPage() {
           {activeTab === "add-video" && (
             <div style={{ maxWidth: 600 }}>
               <h3 style={{ marginBottom: "var(--space-md)" }}>Add New Video</h3>
-              <form onSubmit={handleAddVideo}>
+
+              {/* Mode toggle */}
+              <div style={{ display: "flex", gap: 8, marginBottom: "var(--space-lg)" }}>
+                <button
+                  type="button"
+                  className={`btn ${!videoForm.video_url && !uploadMode ? "btn-primary" : "btn-ghost"}`}
+                  onClick={() => setUploadMode(true)}
+                  style={{ flex: 1 }}
+                >
+                  📁 File Upload
+                </button>
+                <button
+                  type="button"
+                  className={`btn ${!uploadMode ? "btn-primary" : "btn-ghost"}`}
+                  onClick={() => setUploadMode(false)}
+                  style={{ flex: 1 }}
+                >
+                  🔗 URL Mode
+                </button>
+              </div>
+
+              <form onSubmit={uploadMode ? handleUploadVideo : handleAddVideo}>
                 <div className="form-group">
                   <label>Title *</label>
                   <input
@@ -317,23 +397,64 @@ export function AdminPage() {
                     required
                   />
                 </div>
-                <div className="form-group">
-                  <label>Video URL (HLS manifest or MP4) *</label>
-                  <input
-                    value={videoForm.video_url}
-                    onChange={(e) => setVideoForm({ ...videoForm, video_url: e.target.value })}
-                    placeholder="/api/stream/slug/master.m3u8 or direct URL"
-                    required
-                  />
-                </div>
-                <div className="form-group">
-                  <label>Thumbnail URL</label>
-                  <input
-                    value={videoForm.thumbnail_url}
-                    onChange={(e) => setVideoForm({ ...videoForm, thumbnail_url: e.target.value })}
-                    placeholder="https://..."
-                  />
-                </div>
+
+                {uploadMode ? (
+                  <>
+                    <div className="form-group">
+                      <label>Video File (MP4, WebM) *</label>
+                      <input
+                        type="file"
+                        accept="video/*,.mp4,.webm,.vid"
+                        onChange={(e) => setVideoFile(e.target.files?.[0] || null)}
+                        style={{
+                          padding: "var(--space-md)", background: "var(--bg-primary)",
+                          border: "1px solid var(--border)", borderRadius: "var(--radius-md)",
+                          width: "100%", color: "var(--text-primary)",
+                        }}
+                        required
+                      />
+                      {videoFile && (
+                        <span style={{ fontSize: "var(--font-size-xs)", color: "var(--text-secondary)", marginTop: 4 }}>
+                          {videoFile.name} ({(videoFile.size / 1024 / 1024).toFixed(1)} MB)
+                        </span>
+                      )}
+                    </div>
+                    <div className="form-group">
+                      <label>Thumbnail Image (optional)</label>
+                      <input
+                        type="file"
+                        accept="image/*,.jpg,.jpeg,.png,.webp"
+                        onChange={(e) => setThumbFile(e.target.files?.[0] || null)}
+                        style={{
+                          padding: "var(--space-md)", background: "var(--bg-primary)",
+                          border: "1px solid var(--border)", borderRadius: "var(--radius-md)",
+                          width: "100%", color: "var(--text-primary)",
+                        }}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="form-group">
+                      <label>Video URL (HLS manifest or MP4) *</label>
+                      <input
+                        value={videoForm.video_url}
+                        onChange={(e) => setVideoForm({ ...videoForm, video_url: e.target.value })}
+                        placeholder="https://... or /api/stream/slug/master.m3u8"
+                        required
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Thumbnail URL</label>
+                      <input
+                        value={videoForm.thumbnail_url}
+                        onChange={(e) => setVideoForm({ ...videoForm, thumbnail_url: e.target.value })}
+                        placeholder="https://..."
+                      />
+                    </div>
+                  </>
+                )}
+
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-md)" }}>
                   <div className="form-group">
                     <label>Duration (seconds)</label>
@@ -443,12 +564,29 @@ export function AdminPage() {
                     fontSize: "var(--font-size-sm)",
                     marginBottom: "var(--space-md)",
                     color: formMsg.startsWith("Error") ? "var(--error)" : "var(--success)",
+                    wordBreak: "break-word",
                   }}>
                     {formMsg}
                   </div>
                 )}
-                <button type="submit" className="btn btn-primary btn-lg">
-                  Add Video
+                {uploadProgress > 0 && uploadProgress < 100 && (
+                  <div style={{ marginBottom: "var(--space-md)" }}>
+                    <div style={{
+                      height: 6, background: "var(--bg-surface-active)",
+                      borderRadius: "var(--radius-full)", overflow: "hidden",
+                    }}>
+                      <div style={{
+                        height: "100%", width: `${uploadProgress}%`,
+                        background: "var(--accent)", transition: "width 0.3s ease",
+                      }} />
+                    </div>
+                    <span style={{ fontSize: "var(--font-size-xs)", color: "var(--text-secondary)" }}>
+                      Uploading... {uploadProgress}%
+                    </span>
+                  </div>
+                )}
+                <button type="submit" className="btn btn-primary btn-lg" disabled={uploading}>
+                  {uploading ? "Uploading..." : uploadMode ? "📁 Upload & Create" : "🔗 Add Video"}
                 </button>
               </form>
             </div>

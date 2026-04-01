@@ -562,6 +562,140 @@ adminRoutes.post("/ingest-thumbnail/:id", async (c) => {
   }
 });
 
+// POST /api/admin/upload/video/:id — direct file upload (browser → R2)
+adminRoutes.post("/upload/video/:id", async (c) => {
+  try {
+    const id = parseInt(c.req.param("id"));
+    const video = await c.env.DB.prepare("SELECT slug FROM videos WHERE id = ?").bind(id).first<any>();
+    if (!video) return c.json({ success: false, error: "Video not found" }, 404);
+
+    const formData = await c.req.formData();
+    const file = formData.get("file") as File | null;
+    if (!file) return c.json({ success: false, error: "No file uploaded" }, 400);
+
+    const isHLS = file.name.endsWith(".m3u8");
+    const ext = file.name.split(".").pop() || "mp4";
+    const r2Key = `videos/${video.slug}/video.${ext}`;
+
+    const buffer = await file.arrayBuffer();
+    await c.env.STORAGE.put(r2Key, buffer, {
+      httpMetadata: {
+        contentType: file.type || (isHLS ? "application/vnd.apple.mpegurl" : "video/mp4"),
+        cacheControl: "public, max-age=31536000",
+      },
+    });
+
+    const localUrl = `/api/stream/${video.slug}/video.${ext}`;
+    await c.env.DB.prepare(
+      "UPDATE videos SET video_url = ?, file_size = ? WHERE id = ?"
+    ).bind(localUrl, buffer.byteLength, id).run();
+
+    return c.json({
+      success: true,
+      data: { url: localUrl, size: buffer.byteLength },
+    });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message }, 500);
+  }
+});
+
+// POST /api/admin/upload/thumbnail/:id — direct thumbnail upload (browser → R2)
+adminRoutes.post("/upload/thumbnail/:id", async (c) => {
+  try {
+    const id = parseInt(c.req.param("id"));
+    const video = await c.env.DB.prepare("SELECT slug FROM videos WHERE id = ?").bind(id).first<any>();
+    if (!video) return c.json({ success: false, error: "Video not found" }, 404);
+
+    const formData = await c.req.formData();
+    const file = formData.get("file") as File | null;
+    if (!file) return c.json({ success: false, error: "No file uploaded" }, 400);
+
+    const ext = file.name.split(".").pop() || "jpg";
+    const r2Key = `thumbnails/${video.slug}.${ext}`;
+
+    const buffer = await file.arrayBuffer();
+    await c.env.STORAGE.put(r2Key, buffer, {
+      httpMetadata: {
+        contentType: file.type || "image/jpeg",
+        cacheControl: "public, max-age=31536000",
+      },
+    });
+
+    const localUrl = `/api/stream/thumb/${r2Key}`;
+    await c.env.DB.prepare(
+      "UPDATE videos SET thumbnail_url = ? WHERE id = ?"
+    ).bind(localUrl, id).run();
+
+    return c.json({
+      success: true,
+      data: { url: localUrl, size: buffer.byteLength },
+    });
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message }, 500);
+  }
+});
+
+// POST /api/admin/upload/create — create video with direct file upload
+adminRoutes.post("/upload/create", async (c) => {
+  try {
+    const formData = await c.req.formData();
+    const videoFile = formData.get("video") as File | null;
+    const thumbFile = formData.get("thumbnail") as File | null;
+    const title = formData.get("title") as string;
+    const description = formData.get("description") as string || "";
+    const duration = parseInt(formData.get("duration") as string || "0");
+    const resolution = formData.get("resolution") as string || "720p";
+    const tagsStr = formData.get("tags") as string || "[]";
+
+    if (!title || !videoFile) {
+      return c.json({ success: false, error: "Title and video file are required" }, 400);
+    }
+
+    const slug = generateSlug(title);
+
+    // Upload video to R2
+    const videoExt = videoFile.name.split(".").pop() || "mp4";
+    const videoR2Key = `videos/${slug}/video.${videoExt}`;
+    const videoBuffer = await videoFile.arrayBuffer();
+    await c.env.STORAGE.put(videoR2Key, videoBuffer, {
+      httpMetadata: {
+        contentType: videoFile.type || "video/mp4",
+        cacheControl: "public, max-age=31536000",
+      },
+    });
+    const videoUrl = `/api/stream/${slug}/video.${videoExt}`;
+
+    // Upload thumbnail if provided
+    let thumbUrl: string | null = null;
+    if (thumbFile) {
+      const thumbExt = thumbFile.name.split(".").pop() || "jpg";
+      const thumbR2Key = `thumbnails/${slug}.${thumbExt}`;
+      const thumbBuffer = await thumbFile.arrayBuffer();
+      await c.env.STORAGE.put(thumbR2Key, thumbBuffer, {
+        httpMetadata: {
+          contentType: thumbFile.type || "image/jpeg",
+          cacheControl: "public, max-age=31536000",
+        },
+      });
+      thumbUrl = `/api/stream/thumb/${thumbR2Key}`;
+    }
+
+    // Create DB record
+    const result = await c.env.DB.prepare(
+      `INSERT INTO videos (title, slug, description, duration, thumbnail_url, video_url,
+       resolution, file_size, tags, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`
+    ).bind(
+      title, slug, description, duration,
+      thumbUrl, videoUrl, resolution, videoBuffer.byteLength,
+      tagsStr
+    ).run();
+
+    return c.json({ success: true, data: { id: result.meta.last_row_id, slug } }, 201);
+  } catch (err: any) {
+    return c.json({ success: false, error: err.message }, 500);
+  }
+});
+
 function generateSlug(text: string): string {
   const slug = text
     .toLowerCase()
@@ -573,3 +707,4 @@ function generateSlug(text: string): string {
   const suffix = Math.random().toString(36).substring(2, 8);
   return `${slug}-${suffix}`;
 }
+
