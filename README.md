@@ -4,7 +4,7 @@ Cloudflare'in edge altyapısı üzerinde çalışan, modern ve yüksek performan
 
 **Stack:** Cloudflare Workers (Hono) · D1 (SQLite) · R2 (Video/Thumbnail Storage) · Durable Objects · React + Vite
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/YOUR_USERNAME/wtchp)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wtchp/wtchp)
 
 ---
 
