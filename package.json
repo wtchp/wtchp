@@ -1,0 +1,33 @@
+{
+  "name": "wtchp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute wtchp-db --file=./db/schema.sql --local",
+    "db:init:remote": "wrangler d1 execute wtchp-db --file=./db/schema.sql --remote",
+    "db:seed": "wrangler d1 execute wtchp-db --file=./db/seed.sql --local",
+    "db:seed:remote": "wrangler d1 execute wtchp-db --file=./db/seed.sql --remote"
+  },
+  "dependencies": {
+    "hono": "^4.7.0",
+    "hls.js": "^1.6.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.0.0",
+    "@cloudflare/workers-types": "^4.20250320.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.2.0",
+    "wrangler": "^4.0.0"
+  }
+}
