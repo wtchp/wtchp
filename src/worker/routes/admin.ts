@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { requireAdmin } from "../middleware/auth";
-import { ingestThumbnail, ingestMP4, ingestHLS } from "../services/ingest";
+import { ingestThumbnail, ingestMP4, ingestHLS, ingestDASH } from "../services/ingest";
 
 type HonoEnv = { Bindings: Env; Variables: { userId?: number; userRole?: string } };
 
@@ -76,7 +76,7 @@ adminRoutes.post("/videos", async (c) => {
     if (video_url.startsWith("http://") || video_url.startsWith("https://")) {
       try {
         if (video_url.includes(".m3u8")) {
-          // HLS stream
+          // HLS stream — already our target format
           const hlsResult = await ingestHLS(c.env.STORAGE, video_url, slug);
           finalVideoUrl = `/api/stream/${slug}/master.m3u8`;
           ingestResults.video = {
@@ -84,8 +84,17 @@ adminRoutes.post("/videos", async (c) => {
             segments: hlsResult.segmentCount,
             errors: hlsResult.errors.length > 0 ? hlsResult.errors : undefined,
           };
+        } else if (video_url.includes(".mpd")) {
+          // DASH stream → convert to HLS
+          const dashResult = await ingestDASH(c.env.STORAGE, video_url, slug);
+          finalVideoUrl = `/api/stream/${slug}/master.m3u8`;
+          ingestResults.video = {
+            status: "ok", type: "dash→hls",
+            segments: dashResult.segmentCount,
+            errors: dashResult.errors.length > 0 ? dashResult.errors : undefined,
+          };
         } else {
-          // MP4
+          // MP4 — store directly
           const mp4Result = await ingestMP4(c.env.STORAGE, video_url, slug);
           finalVideoUrl = `/api/stream/${slug}/video.mp4`;
           finalFileSize = mp4Result.size;
