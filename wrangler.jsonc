@@ -1,76 +1,72 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "wtchp",
-  "main": "src/worker/index.ts",
-  "compatibility_date": "2025-04-01",
-  "compatibility_flags": ["nodejs_compat"],
-
-  // Assets (Frontend SPA)
-  "assets": {
-    "directory": "dist/client",
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
-  },
-
-  // D1 Database
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "wtchp-db",
-      "database_id": "LOCAL_DEV_DB"
-    }
-  ],
-
-  // R2 Storage
-  "r2_buckets": [
-    {
-      "binding": "STORAGE",
-      "bucket_name": "wtchp-storage"
-    }
-  ],
-
-  // KV Namespace (Sessions)
-  "kv_namespaces": [
-    {
-      "binding": "SESSIONS",
-      "id": "LOCAL_DEV_SESSIONS"
-    }
-  ],
-
-  // Durable Objects
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "VIEW_COUNTER",
-        "class_name": "ViewCounter"
-      }
-    ]
-  },
-
-  // Vars (configurable per environment)
-  "vars": {
-    "SITE_NAME": "WTCHP",
-    "SITE_URL": "https://wtchp.workers.dev",
-    "JWT_SECRET": "change-this-in-production",
-    "ADMIN_SETUP_KEY": "change-this-setup-key",
-    "R2_PUBLIC_URL": "https://storage.wtchp.workers.dev"
-  },
-
-  // Environment-specific overrides
-  "env": {
-    "production": {
-      "vars": {
-        "SITE_URL": "https://yourdomain.com",
-        "R2_PUBLIC_URL": "https://cdn.yourdomain.com"
-      }
-    }
-  },
-
-  // Migrations for Durable Objects
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_classes": ["ViewCounter"]
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "wtchp",
+	"main": "src/worker/index.ts",
+	"compatibility_date": "2025-04-01",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	// Assets (Frontend SPA)
+	"assets": {
+		"directory": "dist/client",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application"
+	},
+	// D1 Database
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "wtchp-db",
+			"database_id": "LOCAL_DEV_DB"
+		}
+	],
+	// R2 Storage
+	"r2_buckets": [
+		{
+			"binding": "STORAGE",
+			"bucket_name": "wtchp-storage"
+		}
+	],
+	// KV Namespace (Sessions)
+	"kv_namespaces": [
+		{
+			"binding": "SESSIONS",
+			"id": "LOCAL_DEV_SESSIONS"
+		}
+	],
+	// Durable Objects
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "VIEW_COUNTER",
+				"class_name": "ViewCounter"
+			}
+		]
+	},
+	// Vars (configurable per environment)
+	"vars": {
+		"SITE_NAME": "WTCHP",
+		"SITE_URL": "https://wtchp.workers.dev",
+		"JWT_SECRET": "change-this-in-production",
+		"ADMIN_SETUP_KEY": "change-this-setup-key",
+		"R2_PUBLIC_URL": "https://storage.wtchp.workers.dev"
+	},
+	// Environment-specific overrides
+	"env": {
+		"production": {
+			"vars": {
+				"SITE_URL": "https://yourdomain.com",
+				"R2_PUBLIC_URL": "https://cdn.yourdomain.com"
+			}
+		}
+	},
+	// Migrations for Durable Objects
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"ViewCounter"
+			]
+		}
+	]
 }

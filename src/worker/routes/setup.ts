@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
+import { hashPassword, createJWT } from "../middleware/auth";
 
 type HonoEnv = { Bindings: Env; Variables: { userId?: number; userRole?: string } };
 
@@ -125,31 +126,20 @@ setupRoutes.post("/create-admin", async (c) => {
       return c.json({ success: false, error: "Password must be at least 6 characters" }, 400);
     }
 
-    // Hash password
-    const encoder = new TextEncoder();
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const saltHex = Array.from(salt).map((b) => b.toString(16).padStart(2, "0")).join("");
-    const keyMaterial = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-    const derivedBits = await crypto.subtle.deriveBits(
-      { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
-      keyMaterial, 256
-    );
-    const hashHex = Array.from(new Uint8Array(derivedBits)).map((b) => b.toString(16).padStart(2, "0")).join("");
-    const passwordHash = `pbkdf2:${saltHex}:${hashHex}`;
+    // Hash password using the same function as auth routes
+    const passwordHash = await hashPassword(password);
 
     // Create admin
     await c.env.DB.prepare(
       "INSERT INTO users (username, email, password_hash, role, display_name) VALUES (?, ?, ?, 'admin', ?)"
     ).bind(username, email, passwordHash, username).run();
 
-    // Generate JWT
+    // Generate JWT using the same function as auth routes
     const user = await c.env.DB.prepare("SELECT id, role, username FROM users WHERE email = ?").bind(email).first<any>();
-    const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" })).replace(/=/g, "");
-    const payload = btoa(JSON.stringify({ id: user.id, role: user.role, username: user.username, iat: Math.floor(Date.now() / 1000) })).replace(/=/g, "");
-    const signatureKey = await crypto.subtle.importKey("raw", encoder.encode(c.env.JWT_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-    const signature = await crypto.subtle.sign("HMAC", signatureKey, encoder.encode(`${header}.${payload}`));
-    const sig = btoa(String.fromCharCode(...new Uint8Array(signature))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
-    const token = `${header}.${payload}.${sig}`;
+    const token = await createJWT(
+      { id: user.id, role: user.role, username: user.username },
+      c.env.JWT_SECRET
+    );
 
     return c.json({ success: true, data: { token, message: "Admin account created!" } });
   } catch (err: any) {

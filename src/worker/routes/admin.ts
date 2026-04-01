@@ -38,7 +38,7 @@ adminRoutes.get("/stats", async (c) => {
   }
 });
 
-// POST /api/admin/videos — create video
+// POST /api/admin/videos — create video (auto-ingest to R2)
 adminRoutes.post("/videos", async (c) => {
   try {
     const body = await c.req.json();
@@ -50,16 +50,54 @@ adminRoutes.post("/videos", async (c) => {
     }
 
     const slug = generateSlug(title);
+    const ingestResults: any = { thumbnail: null, video: null };
 
-    // Auto-download thumbnail to R2 if external URL provided
-    let finalThumbnail = thumbnail_url || null;
-    if (thumbnail_url && (thumbnail_url.startsWith("http://") || thumbnail_url.startsWith("https://"))) {
+    // Auto-ingest thumbnail to R2
+    let finalThumbnail: string | null = null;
+    if (thumbnail_url) {
+      if (thumbnail_url.startsWith("http://") || thumbnail_url.startsWith("https://")) {
+        try {
+          const thumbPath = await ingestThumbnail(c.env.STORAGE, thumbnail_url, slug);
+          finalThumbnail = `/api/stream/thumb/${thumbPath}`;
+          ingestResults.thumbnail = { status: "ok", path: thumbPath };
+        } catch (e: any) {
+          ingestResults.thumbnail = { status: "error", error: e.message };
+        }
+      } else {
+        finalThumbnail = thumbnail_url; // already local
+      }
+    }
+
+    // Auto-ingest video to R2
+    let finalVideoUrl = video_url;
+    let finalFileSize = file_size || 0;
+    const originalVideoUrl = video_url;
+
+    if (video_url.startsWith("http://") || video_url.startsWith("https://")) {
       try {
-        const thumbPath = await ingestThumbnail(c.env.STORAGE, thumbnail_url, slug);
-        finalThumbnail = `/api/stream/thumb/${thumbPath}`;
+        if (video_url.includes(".m3u8")) {
+          // HLS stream
+          const hlsResult = await ingestHLS(c.env.STORAGE, video_url, slug);
+          finalVideoUrl = `/api/stream/${slug}/master.m3u8`;
+          ingestResults.video = {
+            status: "ok", type: "hls",
+            segments: hlsResult.segmentCount,
+            errors: hlsResult.errors.length > 0 ? hlsResult.errors : undefined,
+          };
+        } else {
+          // MP4
+          const mp4Result = await ingestMP4(c.env.STORAGE, video_url, slug);
+          finalVideoUrl = `/api/stream/${slug}/video.mp4`;
+          finalFileSize = mp4Result.size;
+          ingestResults.video = { status: "ok", type: "mp4", size: mp4Result.size };
+        }
       } catch (e: any) {
-        // Keep original URL if download fails
-        console.error("Thumbnail ingest failed:", e.message);
+        // If ingest fails, return error — never store external URLs
+        return c.json({
+          success: false,
+          error: `Video ingest failed: ${e.message}. Content must be stored locally.`,
+          ingest: ingestResults,
+        }, 500);
       }
     }
 
@@ -69,9 +107,9 @@ adminRoutes.post("/videos", async (c) => {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       title, slug, description || null, duration || 0,
-      finalThumbnail, video_url, preview_url || null,
-      resolution || "720p", file_size || 0,
-      source || null, source_url || null,
+      finalThumbnail, finalVideoUrl, preview_url || null,
+      resolution || "720p", finalFileSize,
+      source || null, originalVideoUrl,
       JSON.stringify(tags || []), status || "active"
     ).run();
 
@@ -105,7 +143,7 @@ adminRoutes.post("/videos", async (c) => {
       }
     }
 
-    return c.json({ success: true, data: { id: videoId, slug } }, 201);
+    return c.json({ success: true, data: { id: videoId, slug, ingest: ingestResults } }, 201);
   } catch (err: any) {
     return c.json({ success: false, error: err.message }, 500);
   }
