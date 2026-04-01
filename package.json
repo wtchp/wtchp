@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy": "wrangler deploy",
+    "deploy": "npm run build && wrangler deploy",
     "db:init": "wrangler d1 execute wtchp-db --file=./db/schema.sql --local",
     "db:init:remote": "wrangler d1 execute wtchp-db --file=./db/schema.sql --remote",
     "db:seed": "wrangler d1 execute wtchp-db --file=./db/seed.sql --local",
