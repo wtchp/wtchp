@@ -268,7 +268,7 @@ function isSegmentLine(line: string): boolean {
 
 /**
  * Download a DASH stream (.mpd) — keep as MPD format
- * Downloads all segments, rewrites MPD to use local relative paths
+ * Only downloads best quality per AdaptationSet to stay within Worker limits
  */
 export async function ingestDASH(
   storage: R2Bucket,
@@ -279,7 +279,6 @@ export async function ingestDASH(
   let segmentCount = 0;
   const baseUrl = mpdUrl.substring(0, mpdUrl.lastIndexOf("/") + 1);
 
-  // Fetch MPD
   const mpdRes = await safeFetch(mpdUrl);
   if (!mpdRes.ok) throw new Error(`Failed to fetch MPD: ${mpdRes.status}`);
   const mpdContent = await mpdRes.text();
@@ -288,63 +287,57 @@ export async function ingestDASH(
     throw new Error(`Invalid MPD. Content: ${mpdContent.substring(0, 200)}`);
   }
 
-  // Find all referenced files from SegmentTemplate patterns
-  const filesToDownload = new Set<string>();
+  const durMatch = mpdContent.match(/mediaPresentationDuration="([^"]+)"/);
+  const totalDuration = durMatch ? parseDuration(durMatch[1]) : 0;
 
-  // Extract all RepresentationIDs from the MPD
-  const repIdMatches = [...mpdContent.matchAll(/<Representation[^>]+id="([^"]+)"/gi)];
-  const repIds = repIdMatches.map(m => m[1]);
+  const adaptSets = splitAdaptationSets(mpdContent);
+  const filesToDownload: string[] = [];
+  const selectedRepIds = new Set<string>();
 
-  // Extract SegmentTemplate initialization and media patterns
-  const initPatterns = [...mpdContent.matchAll(/initialization="([^"]+)"/gi)].map(m => m[1]);
-  const mediaPatterns = [...mpdContent.matchAll(/\bmedia="([^"]+)"/gi)].map(m => m[1]);
+  for (const adaptSet of adaptSets) {
+    const initTpl = extractAttr(adaptSet, "initialization");
+    const mediaTpl = extractAttr(adaptSet, "media");
+    const startNum = parseInt(extractAttr(adaptSet, "startNumber") || "1");
+    const timescale = parseInt(extractAttr(adaptSet, "timescale") || "1000");
 
-  // Parse SegmentTimeline to count segments
-  const timelineEntries: { duration: number; repeat: number }[] = [];
-  for (const sMatch of mpdContent.matchAll(/<S\s+([^/>]+)\/?\s*>/gi)) {
-    const attrs = sMatch[1];
-    const d = parseInt(attrs.match(/d="(\d+)"/)?.[1] || "0");
-    const r = parseInt(attrs.match(/r="(\d+)"/)?.[1] || "0");
-    timelineEntries.push({ duration: d, repeat: r });
-  }
+    if (!mediaTpl) continue;
 
-  // Total segments per representation from timeline
-  const timelineCount = (mpdContent.match(/<SegmentTimeline>/gi) || []).length || 1;
-  let totalTimelineSegments = 0;
-  for (const e of timelineEntries) totalTimelineSegments += 1 + e.repeat;
-  const segmentsPerRep = Math.ceil(totalTimelineSegments / timelineCount);
-
-  // If no timeline, estimate from duration
-  let estimatedSegments = segmentsPerRep;
-  if (estimatedSegments === 0) {
-    const durMatch = mpdContent.match(/mediaPresentationDuration="([^"]+)"/);
-    const totalDur = durMatch ? parseDuration(durMatch[1]) : 0;
-    const tsMatch = mpdContent.match(/timescale="(\d+)"/);
-    const durAttrMatch = mpdContent.match(/<SegmentTemplate[^>]+duration="(\d+)"/);
-    const timescale = parseInt(tsMatch?.[1] || "1000");
-    const segDur = parseInt(durAttrMatch?.[1] || "6000");
-    estimatedSegments = totalDur > 0 ? Math.ceil(totalDur / (segDur / timescale)) : 200;
-  }
-
-  const startNumMatch = mpdContent.match(/startNumber="(\d+)"/);
-  const startNum = parseInt(startNumMatch?.[1] || "1");
-
-  // Build file list: init segments
-  for (const initTpl of initPatterns) {
-    for (const repId of repIds) {
-      const filename = resolveTemplate(initTpl, repId, 0);
-      filesToDownload.add(filename);
+    // Get all reps with bandwidth — pick ONLY the best one
+    const reps: { id: string; bandwidth: number }[] = [];
+    for (const m of adaptSet.matchAll(/<Representation[^>]+>/gi)) {
+      const id = extractAttr(m[0], "id");
+      const bw = parseInt(extractAttr(m[0], "bandwidth") || "0");
+      if (id) reps.push({ id, bandwidth: bw });
     }
-  }
+    if (reps.length === 0) continue;
 
-  // Build file list: media segments
-  for (const mediaTpl of mediaPatterns) {
-    for (const repId of repIds) {
-      for (let n = startNum; n < startNum + estimatedSegments; n++) {
-        const filename = resolveTemplate(mediaTpl, repId, n);
-        filesToDownload.add(filename);
+    reps.sort((a, b) => b.bandwidth - a.bandwidth);
+    const bestRep = reps[0];
+    selectedRepIds.add(bestRep.id);
+
+    // Count segments
+    let numSegments = 0;
+    const sMatches = [...adaptSet.matchAll(/<S\s+([^/>]+)\/?\s*>/gi)];
+    if (sMatches.length > 0) {
+      for (const sm of sMatches) {
+        const r = parseInt(sm[1].match(/r="(\d+)"/)?.[1] || "0");
+        numSegments += 1 + r;
       }
+    } else {
+      const segDur = parseInt(extractAttr(adaptSet, "duration") || "0");
+      numSegments = (segDur > 0 && totalDuration > 0)
+        ? Math.ceil(totalDuration / (segDur / timescale))
+        : (totalDuration > 0 ? Math.ceil(totalDuration / 6) : 200);
     }
+
+    if (initTpl) filesToDownload.push(resolveTemplate(initTpl, bestRep.id, 0));
+    for (let n = startNum; n < startNum + numSegments; n++) {
+      filesToDownload.push(resolveTemplate(mediaTpl, bestRep.id, n));
+    }
+  }
+
+  if (filesToDownload.length === 0) {
+    throw new Error("No segments found in MPD manifest");
   }
 
   // Download all files
@@ -363,9 +356,7 @@ export async function ingestDASH(
           });
           segmentCount++;
         }
-      } else if (res.status === 404) {
-        // Past last segment, that's OK
-      } else {
+      } else if (res.status !== 404) {
         errors.push(`${filename}: HTTP ${res.status}`);
       }
     } catch (e: any) {
@@ -377,9 +368,16 @@ export async function ingestDASH(
     throw new Error(`No segments downloaded. Errors: ${errors.slice(0, 5).join("; ")}`);
   }
 
-  // Store MPD as-is (segment filenames in templates are relative, so they work)
-  // Just remove any external BaseURL elements
+  // Rewrite MPD: remove Representations we didn't download, remove BaseURL
   let rewrittenMPD = mpdContent.replace(/<BaseURL>[^<]*<\/BaseURL>/gi, "");
+  // Remove non-selected Representation blocks
+  rewrittenMPD = rewrittenMPD.replace(
+    /<Representation\b[^>]*>[\s\S]*?<\/Representation>/gi,
+    (match) => {
+      const id = extractAttr(match, "id");
+      return (id && selectedRepIds.has(id)) ? match : "";
+    }
+  );
 
   const mpdPath = `videos/${slug}/manifest.mpd`;
   await storage.put(mpdPath, rewrittenMPD, {
@@ -387,6 +385,27 @@ export async function ingestDASH(
   });
 
   return { path: mpdPath, segmentCount, errors };
+}
+
+/** Split MPD into AdaptationSet blocks (handles nested elements) */
+function splitAdaptationSets(mpd: string): string[] {
+  const results: string[] = [];
+  let searchFrom = 0;
+  while (true) {
+    const start = mpd.indexOf("<AdaptationSet", searchFrom);
+    if (start === -1) break;
+    const end = mpd.indexOf("</AdaptationSet>", start);
+    if (end === -1) break;
+    results.push(mpd.substring(start, end + "</AdaptationSet>".length));
+    searchFrom = end + "</AdaptationSet>".length;
+  }
+  return results;
+}
+
+function extractAttr(xml: string, attr: string): string | null {
+  const regex = new RegExp(`${attr}="([^"]*)"`, "i");
+  const match = xml.match(regex);
+  return match ? match[1] : null;
 }
 
 function resolveTemplate(template: string, repId: string, number: number): string {
@@ -406,3 +425,4 @@ function parseDuration(iso: string): number {
          (parseInt(match[2] || "0") * 60) +
          (parseFloat(match[3] || "0"));
 }
+
