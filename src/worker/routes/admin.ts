@@ -400,10 +400,10 @@ adminRoutes.get("/videos", async (c) => {
     const offset = (page - 1) * perPage;
     const status = c.req.query("status");
 
-    let where = "WHERE status != 'deleted'";
+    let where = "";
     const binds: any[] = [];
     if (status) {
-      where += " AND status = ?";
+      where = "WHERE status = ?";
       binds.push(status);
     }
 
